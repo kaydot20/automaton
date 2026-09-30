@@ -380,7 +380,9 @@ describe("x402 SSRF gate (F4.1)", () => {
       undefined,
       undefined,
       undefined,
-      { allowedDomains: ["conway.tech"] },
+      // M1-B4 remediation: DNS is mandatory on the payment path — inject a
+      // public resolver so the test reaches the allowlist check.
+      { allowedDomains: ["conway.tech"], dnsResolver: { lookup: async () => ["93.184.216.34"] } },
     );
 
     expect(result.success).toBe(false);

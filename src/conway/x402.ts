@@ -14,13 +14,18 @@ import {
 } from "viem";
 import { base, baseSepolia } from "viem/chains";
 import { ResilientHttpClient } from "./http-client.js";
-import { assertOutboundAllowed } from "../net/policy.js";
+import { assertOutboundAllowed, type DnsResolver } from "../net/policy.js";
 import { checkReserve, validateSpendCents } from "./reserve.js";
 import type { HttpClientConfig } from "../types.js";
 import { DEFAULT_TREASURY_POLICY } from "../types.js";
 import type { ChainType } from "../identity/chain.js";
 
-const x402HttpClient = new ResilientHttpClient();
+// M1-B4 (remediation): the payment transport REQUIRES DNS resolution —
+// every production x402 request resolves its hostname and validates every
+// returned address before the first fetch and before any signature.
+const x402HttpClient = new ResilientHttpClient({
+  requireDnsResolution: true,
+});
 
 /**
  * Optional per-call overrides for the x402 transport. The outbound-network
@@ -30,6 +35,11 @@ const x402HttpClient = new ResilientHttpClient();
 export interface X402FetchOptions {
   client?: ResilientHttpClient;
   allowedDomains?: string[];
+  /**
+   * DNS resolver for the mandatory resolution-time SSRF tier. Production
+   * uses system DNS via node:dns when omitted; tests inject fakes here.
+   */
+  dnsResolver?: DnsResolver;
 }
 
 // USDC contract addresses
@@ -360,14 +370,30 @@ export async function x402Fetch(
     };
   }
 
-  // M1-B4 (F4.1/F4.3): SSRF gate BEFORE any request or signature. Static
-  // checks (scheme, literal private addresses like metadata endpoints,
-  // malformed hostnames) always run. The payment-purpose domain allowlist
-  // is enforced ONLY when the caller supplies one — the credit-topup income
-  // path (B2 self-rescue) targets the agent's own configured Conway API and
-  // must never be blocked by an absent allowlist.
+  // M1-B4 (F4.1/F4.3, remediated): SSRF gate BEFORE any request or
+  // signature. Static checks (scheme, literal private addresses like
+  // metadata endpoints, malformed hostnames) always run, and DNS resolution
+  // is MANDATORY on the payment path: the hostname must resolve and every
+  // returned A/AAAA address must pass the private/special-use blocklist —
+  // fail-closed on resolution failure, empty answers, or malformed output.
+  // The payment-purpose domain allowlist is enforced ONLY when the caller
+  // supplies one — the credit-topup income path (B2 self-rescue) targets
+  // the agent's own configured Conway API and must never be blocked by an
+  // absent allowlist.
   const transport = options?.client ?? x402HttpClient;
-  const precheck = await assertOutboundAllowed(url, { purpose: "fetch" });
+  // Policy checks take { resolver }; the transport takes { dnsResolver }.
+  const policyDns = {
+    resolver: options?.dnsResolver,
+    requireDnsResolution: true,
+  } as const;
+  const transportDns = {
+    dnsResolver: options?.dnsResolver,
+    requireDnsResolution: true,
+  } as const;
+  const precheck = await assertOutboundAllowed(url, {
+    purpose: "fetch",
+    ...policyDns,
+  });
   if (!precheck.allowed) {
     return {
       success: false,
@@ -379,6 +405,7 @@ export async function x402Fetch(
     const payCheck = await assertOutboundAllowed(url, {
       purpose: "payment",
       allowedDomains: options.allowedDomains,
+      ...policyDns,
     });
     if (!payCheck.allowed) {
       return {
@@ -390,11 +417,14 @@ export async function x402Fetch(
   }
 
   try {
-    // Initial request (non-mutating probe, policy-checked transport)
+    // Initial request (non-mutating probe). The transport re-runs the full
+    // policy — including fresh DNS resolution — on this hop and on every
+    // redirect destination.
     const initialResp = await transport.request(url, {
       method,
       headers: { ...headers, "Content-Type": "application/json" },
       body,
+      ...transportDns,
     });
 
     if (initialResp.status !== 402) {
@@ -496,6 +526,7 @@ export async function x402Fetch(
       },
       body,
       retries: 0, // Paid request: do not auto-retry (payment already signed)
+      ...transportDns,
     });
 
     const data = await paidResp.json().catch(() => paidResp.text());

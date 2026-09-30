@@ -261,6 +261,7 @@ export async function runAgentLoop(
                       account: identity.account,
                       error: sandboxError,
                       chainType: config.chainType || identity.chainType || "evm",
+                      dnsResolver: config.dnsResolver,
                     });
 
                     if (topupResult?.success) {
@@ -456,6 +457,7 @@ export async function runAgentLoop(
                 account: identity.account,
                 creditsCents: financial.creditsCents,
                 chainType: config.chainType || identity.chainType || "evm",
+                dnsResolver: config.dnsResolver,
               });
               if (topupResult?.success) {
                 log(config, `[AUTO-TOPUP] Bought $${topupResult.amountUsd} credits from USDC mid-loop`);

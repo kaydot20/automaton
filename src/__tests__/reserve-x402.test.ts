@@ -32,6 +32,12 @@ const MERCHANT_URL = "https://pay.conway.test/api";
 const ACCOUNT = privateKeyToAccount(`0x${"11".repeat(32)}`);
 const OTHER_ADDRESS = `0x${"9".repeat(40)}`;
 
+/**
+ * M1-B4 remediation: DNS resolution is MANDATORY on the payment path.
+ * Tests inject a public resolver instead of weakening enforcement.
+ */
+const PUBLIC_DNS = { lookup: async () => ["93.184.216.34"] };
+
 /** Build a 402 payment-required response (x402 v1, decimal-dollar amounts). */
 function paymentRequired(maxAmountRequired: string, x402Version = 1): Response {
   const body = {
@@ -130,7 +136,7 @@ describe("x402Fetch reserve gate (payment path)", () => {
     // Balance $10.05 (1005¢); payment 10¢ → post-spend 995 < 1000 reserve.
     const stub = stubFetch({ balanceAtomic: centsToAtomic(1005) });
 
-    const result = await x402Fetch(MERCHANT_URL, ACCOUNT, "GET", undefined, undefined, 100);
+    const result = await x402Fetch(MERCHANT_URL, ACCOUNT, "GET", undefined, undefined, 100, undefined, undefined, { dnsResolver: PUBLIC_DNS });
 
     stub.restore();
     expect(result.success).toBe(false);
@@ -143,7 +149,7 @@ describe("x402Fetch reserve gate (payment path)", () => {
     // Balance $10.10 (1010¢); payment 10¢ → post-spend exactly 1000 == reserve.
     const stub = stubFetch({ balanceAtomic: centsToAtomic(1010) });
 
-    const result = await x402Fetch(MERCHANT_URL, ACCOUNT, "GET", undefined, undefined, 100);
+    const result = await x402Fetch(MERCHANT_URL, ACCOUNT, "GET", undefined, undefined, 100, undefined, undefined, { dnsResolver: PUBLIC_DNS });
 
     stub.restore();
     expect(result.success).toBe(true);
@@ -156,7 +162,7 @@ describe("x402Fetch reserve gate (payment path)", () => {
     // Balance $10.09 (1009¢); payment 10¢ → post-spend 999 < 1000.
     const stub = stubFetch({ balanceAtomic: centsToAtomic(1009) });
 
-    const result = await x402Fetch(MERCHANT_URL, ACCOUNT, "GET", undefined, undefined, 100);
+    const result = await x402Fetch(MERCHANT_URL, ACCOUNT, "GET", undefined, undefined, 100, undefined, undefined, { dnsResolver: PUBLIC_DNS });
 
     stub.restore();
     expect(result.success).toBe(false);
@@ -172,7 +178,7 @@ describe("x402Fetch reserve gate (payment path)", () => {
       merchantResponse: () => paymentRequired("5.00"),
     });
 
-    const result = await x402Fetch(MERCHANT_URL, ACCOUNT, "GET", undefined, undefined, 100);
+    const result = await x402Fetch(MERCHANT_URL, ACCOUNT, "GET", undefined, undefined, 100, undefined, undefined, { dnsResolver: PUBLIC_DNS });
 
     stub.restore();
     expect(result.success).toBe(false);
@@ -187,7 +193,7 @@ describe("x402Fetch reserve gate (payment path)", () => {
       merchantResponse: () => paymentRequired("5.00"),
     });
 
-    const result = await x402Fetch(MERCHANT_URL, ACCOUNT, "GET", undefined, undefined, undefined);
+    const result = await x402Fetch(MERCHANT_URL, ACCOUNT, "GET", undefined, undefined, undefined, undefined, undefined, { dnsResolver: PUBLIC_DNS });
 
     stub.restore();
     expect(result.success).toBe(false);
@@ -200,7 +206,7 @@ describe("x402Fetch reserve gate (payment path)", () => {
       merchantResponse: () => paymentRequired("5.00"),
     });
 
-    const result = await x402Fetch(MERCHANT_URL, ACCOUNT, "GET", undefined, undefined, Number.NaN);
+    const result = await x402Fetch(MERCHANT_URL, ACCOUNT, "GET", undefined, undefined, Number.NaN, undefined, undefined, { dnsResolver: PUBLIC_DNS });
 
     stub.restore();
     expect(result.success).toBe(false);
@@ -236,7 +242,7 @@ describe("x402Fetch reserve gate (payment path)", () => {
         }),
     });
 
-    const result = await x402Fetch(MERCHANT_URL, ACCOUNT, "GET", undefined, undefined, 100);
+    const result = await x402Fetch(MERCHANT_URL, ACCOUNT, "GET", undefined, undefined, 100, undefined, undefined, { dnsResolver: PUBLIC_DNS });
 
     stub.restore();
     expect(result.success).toBe(false);
@@ -249,7 +255,7 @@ describe("x402Fetch reserve gate (payment path)", () => {
     // cap still holds, and the paid retry proceeds.
     const stub = stubFetch({ balanceAtomic: null });
 
-    const result = await x402Fetch(MERCHANT_URL, ACCOUNT, "GET", undefined, undefined, 100);
+    const result = await x402Fetch(MERCHANT_URL, ACCOUNT, "GET", undefined, undefined, 100, undefined, undefined, { dnsResolver: PUBLIC_DNS });
 
     stub.restore();
     expect(result.success).toBe(true);
@@ -272,6 +278,7 @@ describe("x402_fetch tool path (same invariant through executeTool)", () => {
         conwayApiUrl: "https://api.conway.test",
         chainType: "evm",
         treasuryPolicy: { ...DEFAULT_TREASURY_POLICY },
+        dnsResolver: PUBLIC_DNS,
       },
       db: {
         insertTransaction: vi.fn(),
@@ -330,7 +337,7 @@ describe("auto-topup reconciliation (topup.ts)", () => {
     // agent's own credits, so it must proceed (solvency holds: 8 >= 5).
     const stub = stubFetch({ balanceAtomic: centsToAtomic(800) });
 
-    const result = await topupCredits("https://api.conway.test", ACCOUNT, 5);
+    const result = await topupCredits("https://api.conway.test", ACCOUNT, 5, undefined, PUBLIC_DNS);
 
     stub.restore();
     expect(result.success).toBe(true);
@@ -342,7 +349,7 @@ describe("auto-topup reconciliation (topup.ts)", () => {
     // Balance $3 < $5 tier: not enough USDC to pay — blocked before signing.
     const stub = stubFetch({ balanceAtomic: centsToAtomic(300) });
 
-    const result = await topupCredits("https://api.conway.test", ACCOUNT, 5);
+    const result = await topupCredits("https://api.conway.test", ACCOUNT, 5, undefined, PUBLIC_DNS);
 
     stub.restore();
     expect(result.success).toBe(false);
@@ -369,7 +376,7 @@ describe("auto-topup reconciliation (topup.ts)", () => {
   it("topup is blocked when the USDC balance source fails (fail-closed)", async () => {
     const stub = stubFetch({ balanceAtomic: null });
 
-    const result = await topupCredits("https://api.conway.test", ACCOUNT, 5);
+    const result = await topupCredits("https://api.conway.test", ACCOUNT, 5, undefined, PUBLIC_DNS);
 
     stub.restore();
     expect(result.success).toBe(false);
@@ -385,6 +392,7 @@ describe("auto-topup reconciliation (topup.ts)", () => {
       ACCOUNT,
       25,
       OTHER_ADDRESS,
+      PUBLIC_DNS,
     );
 
     stub.restore();
@@ -407,6 +415,7 @@ describe("auto-topup reconciliation (topup.ts)", () => {
       ACCOUNT,
       25,
       OTHER_ADDRESS,
+      PUBLIC_DNS,
     );
 
     stub.restore();
@@ -430,6 +439,7 @@ describe("auto-topup reconciliation (topup.ts)", () => {
       account: ACCOUNT,
       creditsCents: 100,
       chainType: "evm",
+      dnsResolver: PUBLIC_DNS,
     });
 
     stub.restore();
@@ -453,6 +463,7 @@ describe("auto-topup reconciliation (topup.ts)", () => {
       account: ACCOUNT,
       creditsCents: 100,
       chainType: "evm",
+      dnsResolver: PUBLIC_DNS,
     });
 
     stub.restore();

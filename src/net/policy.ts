@@ -207,6 +207,21 @@ function hostnameAllowedForPurpose(
   );
 }
 
+// ─── Default resolver (system DNS via node:dns) ──────────────
+
+async function defaultLookup(hostname: string): Promise<string[]> {
+  const dns = await import("node:dns");
+  const result = await dns.promises.lookup(hostname, { all: true, verbatim: true });
+  return result.map((entry) => entry.address);
+}
+
+/** True when a resolved value is a parseable IP literal (v4 or v6). */
+function isParseableAddress(address: string): boolean {
+  const value = address.toLowerCase().replace(/%.*$/, "");
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(value)) return ipv4ToInt(value) !== null;
+  return value.includes(":");
+}
+
 // ─── Main gate ──────────────────────────────────────────────────
 
 /**
@@ -272,18 +287,17 @@ export async function assertOutboundAllowed(
     };
   }
 
-  // 2c. Resolve and validate EVERY address (when the DNS tier can run)
-  if (options.requireDnsResolution === true && !options.resolver) {
-    return {
-      allowed: false,
-      code: "RESOLUTION_FAILED",
-      message: "Blocked outbound request: no DNS resolver configured",
-    };
-  }
-  if (options.resolver) {
+  // 2c. Resolve and validate EVERY address. Resolution runs whenever a
+  // resolver is injected OR the caller requires DNS validation (mandatory
+  // tier — production x402/payment). Fail-closed on failure, empty results,
+  // and malformed resolution output.
+  if (options.resolver || options.requireDnsResolution === true) {
+    const lookup = options.resolver
+      ? options.resolver.lookup
+      : defaultLookup;
     let addresses: string[];
     try {
-      addresses = await options.resolver.lookup(hostname);
+      addresses = await lookup(hostname);
     } catch {
       if (options.requireDnsResolution === true) {
         return {
@@ -292,7 +306,8 @@ export async function assertOutboundAllowed(
           message: "Blocked outbound request: hostname resolution failed",
         };
       }
-      // Resolver configured but unavailable: degrade to static checks.
+      // Explicit resolver unavailable on a non-mandatory path: degrade to
+      // static checks (documented).
       return { allowed: true };
     }
     if (!Array.isArray(addresses) || addresses.length === 0) {
@@ -303,6 +318,13 @@ export async function assertOutboundAllowed(
       };
     }
     for (const address of addresses) {
+      if (!isParseableAddress(address)) {
+        return {
+          allowed: false,
+          code: "RESOLUTION_FAILED",
+          message: "Blocked outbound request: resolver returned a malformed address",
+        };
+      }
       if (isPrivateAddress(address)) {
         return {
           allowed: false,

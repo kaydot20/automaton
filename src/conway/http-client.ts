@@ -58,24 +58,35 @@ export class ResilientHttpClient {
       timeout?: number;
       idempotencyKey?: string;
       retries?: number;
+      /** Per-call DNS resolver override (tests / scoped enforcement). */
+      dnsResolver?: DnsResolver;
+      /** Per-call mandatory-DNS override. */
+      requireDnsResolution?: boolean;
     },
   ): Promise<Response> {
     const opts = options ?? {};
     const timeout = opts.timeout ?? this.config.baseTimeout;
     const maxRetries = opts.retries ?? this.config.maxRetries;
+    // Per-call DNS overrides win over client defaults; mandatory-DNS is
+    // sticky (a per-call false cannot weaken a client that requires it).
+    const dnsResolver = opts.dnsResolver ?? this.config.dnsResolver;
+    const requireDnsResolution =
+      opts.requireDnsResolution === true || this.config.requireDnsResolution === true;
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       let currentUrl = url;
       let hops = 0;
 
       // ── Policy-checked hop loop (redirects followed manually) ──
+      // EVERY hop — the initial URL and each redirect destination — is
+      // re-validated (including fresh DNS resolution) before its fetch.
       for (;;) {
         const check = await assertOutboundAllowed(currentUrl, {
           purpose: this.config.outboundPurpose ?? "fetch",
           allowedDomains: this.config.allowedDomains,
           allowHttpOnLoopback: this.config.allowHttpOnLoopback,
-          resolver: this.config.dnsResolver,
-          requireDnsResolution: this.config.requireDnsResolution ?? false,
+          resolver: dnsResolver,
+          requireDnsResolution,
         });
         if (!check.allowed) {
           throw new Error(check.message);
@@ -191,13 +202,19 @@ export class ResilientHttpClient {
    * Direct access to the outbound-network policy for callers that need to
    * pre-check a URL before deciding to build a request at all.
    */
-  async checkOutboundNetwork(url: string, purpose: OutboundPurpose): Promise<void> {
+  async checkOutboundNetwork(
+    url: string,
+    purpose: OutboundPurpose,
+    overrides?: { dnsResolver?: DnsResolver; requireDnsResolution?: boolean },
+  ): Promise<void> {
     const check = await assertOutboundAllowed(url, {
       purpose,
       allowedDomains: this.config.allowedDomains,
       allowHttpOnLoopback: this.config.allowHttpOnLoopback,
-      resolver: this.config.dnsResolver,
-      requireDnsResolution: this.config.requireDnsResolution ?? false,
+      resolver: overrides?.dnsResolver ?? this.config.dnsResolver,
+      requireDnsResolution:
+        overrides?.requireDnsResolution === true ||
+        this.config.requireDnsResolution === true,
     });
     if (!check.allowed) {
       throw new Error(check.message);

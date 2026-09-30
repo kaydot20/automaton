@@ -331,6 +331,8 @@ export function createBuiltinTools(sandboxId: string): AutomatonTool[] {
           ctx.config.conwayApiUrl,
           ctx.identity.account,
           amountUsd,
+          undefined,
+          ctx.config.dnsResolver,
         );
 
         if (!result.success) {
@@ -1691,6 +1693,7 @@ Model: ${ctx.inference.getDefaultModel()}
                 account: ctx.identity.account,
                 error: err,
                 chainType: ctx.config.chainType || ctx.identity.chainType || "evm",
+                dnsResolver: ctx.config.dnsResolver,
               });
               if (topup?.success) {
                 const retryLifecycle = new ChildLifecycle(ctx.db.raw);
@@ -2807,8 +2810,9 @@ Model: ${ctx.inference.getDefaultModel()}
         // tool by default — with the shipped DEFAULT_TREASURY_POLICY
         // (x402AllowedDomains: ['conway.tech']) it would deny every ordinary
         // paid fetch and silently change economic behavior. x402Fetch still
-        // enforces the SSRF statics on every call; wiring the allowlist into
-        // operator policy belongs to a later phase.
+        // enforces the SSRF statics AND mandatory DNS resolution on every
+        // call; wiring the allowlist into operator policy belongs to a later
+        // phase. config.dnsResolver overrides system DNS when present.
         const result = await x402Fetch(
           url,
           ctx.identity.account,
@@ -2816,6 +2820,9 @@ Model: ${ctx.inference.getDefaultModel()}
           body,
           extraHeaders,
           maxPayment,
+          undefined,
+          undefined,
+          { dnsResolver: ctx.config.dnsResolver },
         );
 
         if (!result.success) {

@@ -68,6 +68,12 @@ export interface AutomatonConfig {
   parentAddress?: string;
   socialRelayUrl?: string;
   treasuryPolicy?: TreasuryPolicy;
+  /**
+   * Optional DNS resolver override for the mandatory resolution-time SSRF
+   * tier on the payment path (M1-B4). Production defaults to system DNS
+   * (node:dns); tests and air-gapped deployments may inject a resolver.
+   */
+  dnsResolver?: import("./net/policy.js").DnsResolver;
   // Phase 2 config additions
   soulConfig?: SoulConfig;
   modelStrategy?: ModelStrategyConfig;

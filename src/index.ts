@@ -352,6 +352,7 @@ async function run(): Promise<void> {
             account,
             creditsCents,
             chainType: resolvedChainType,
+            dnsResolver: config.dnsResolver,
           });
           if (topupResult?.success) {
             logger.info(

@@ -16,6 +16,7 @@
 import type { PrivateKeyAccount, Address } from "viem";
 import { x402Fetch, getUsdcBalance } from "./x402.js";
 import { checkReserve, validateSpendCents } from "./reserve.js";
+import type { DnsResolver } from "../net/policy.js";
 import { DEFAULT_TREASURY_POLICY } from "../types.js";
 import { createLogger } from "../observability/logger.js";
 import type { ChainType } from "../identity/chain.js";
@@ -52,6 +53,7 @@ export async function topupCredits(
   account: PrivateKeyAccount,
   amountUsd: number,
   recipientAddress?: Address,
+  dnsResolver?: DnsResolver,
 ): Promise<TopupResult> {
   const address = recipientAddress || account.address;
 
@@ -143,6 +145,7 @@ export async function topupCredits(
     TOPUP_TIERS[TOPUP_TIERS.length - 1],
     undefined,
     true,
+    { dnsResolver },
   );
 
   if (!result.success) {
@@ -190,8 +193,9 @@ export async function topupForSandbox(params: {
   account: PrivateKeyAccount;
   error: Error & { status?: number; responseText?: string };
   chainType?: ChainType;
+  dnsResolver?: DnsResolver;
 }): Promise<TopupResult | null> {
-  const { apiUrl, account, error, chainType } = params;
+  const { apiUrl, account, error, chainType, dnsResolver } = params;
 
   // Solana wallets cannot use x402 for topup (EVM-only payment protocol)
   if (chainType === "solana") {
@@ -241,7 +245,7 @@ export async function topupForSandbox(params: {
   }
 
   logger.info(`Sandbox topup: deficit=${deficitCents}c, buying $${selectedTier} tier`);
-  return topupCredits(apiUrl, account, selectedTier);
+  return topupCredits(apiUrl, account, selectedTier, undefined, dnsResolver);
 }
 
 /**
@@ -258,6 +262,7 @@ export async function bootstrapTopup(params: {
   creditsCents: number;
   creditThresholdCents?: number;
   chainType?: ChainType;
+  dnsResolver?: DnsResolver;
 }): Promise<TopupResult | null> {
   const { apiUrl, account, creditsCents, creditThresholdCents = 500, chainType } = params;
 
@@ -295,5 +300,5 @@ export async function bootstrapTopup(params: {
     `Bootstrap topup: credits=$${(creditsCents / 100).toFixed(2)}, USDC=$${usdcBalance.toFixed(2)}, buying $${minTier}`,
   );
 
-  return topupCredits(apiUrl, account, minTier);
+  return topupCredits(apiUrl, account, minTier, undefined, params.dnsResolver);
 }
