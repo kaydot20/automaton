@@ -2803,6 +2803,12 @@ Model: ${ctx.inference.getDefaultModel()}
         const maxPayment =
           ctx.config.treasuryPolicy?.maxX402PaymentCents ??
           DEFAULT_TREASURY_POLICY.maxX402PaymentCents;
+        // M1-B4: the payment-purpose domain allowlist is NOT applied by the
+        // tool by default — with the shipped DEFAULT_TREASURY_POLICY
+        // (x402AllowedDomains: ['conway.tech']) it would deny every ordinary
+        // paid fetch and silently change economic behavior. x402Fetch still
+        // enforces the SSRF statics on every call; wiring the allowlist into
+        // operator policy belongs to a later phase.
         const result = await x402Fetch(
           url,
           ctx.identity.account,

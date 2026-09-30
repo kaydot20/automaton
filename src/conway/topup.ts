@@ -128,9 +128,12 @@ export async function topupCredits(
   // skipReserveCheck: topup is the USDC→credits income path. Its protections
   // are (1) tier validation, (2) the solvency / cross-recipient reserve
   // checks above, and (3) the x402 per-payment cap passed explicitly here
-  // (largest valid tier). x402Fetch's USDC reserve check is skipped because
-  // a self-topup must remain possible when credits are critical — the exact
-  // situation the reserve exists to survive.
+  // (largest valid tier), plus (4) the outbound-network SSRF gate, which
+  // runs unconditionally in x402Fetch. x402Fetch's USDC reserve check is
+  // skipped because a self-topup must remain possible when credits are
+  // critical — the exact situation the reserve exists to survive. No domain
+  // allowlist is passed: the topup endpoint is the agent's own configured
+  // Conway API (self-rescue must not depend on a payment allowlist).
   const result = await x402Fetch(
     url,
     account,

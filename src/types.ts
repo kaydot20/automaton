@@ -608,6 +608,11 @@ export interface HttpClientConfig {
   circuitBreakerThreshold: number;   // default: 5
   circuitBreakerResetMs: number;     // default: 60_000ms
   allowHttpOnLoopback: boolean;      // default: false (for local dev only)
+  // M1-B4 (F4.3): outbound-network policy wiring (all optional)
+  outboundPurpose?: import("./net/policy.js").OutboundPurpose;
+  allowedDomains?: string[];         // payment allowlist (x402AllowedDomains)
+  dnsResolver?: import("./net/policy.js").DnsResolver;
+  requireDnsResolution?: boolean;    // deny when DNS tier cannot run
 }
 
 export const DEFAULT_HTTP_CLIENT_CONFIG: HttpClientConfig = {

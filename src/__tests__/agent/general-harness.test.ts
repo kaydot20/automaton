@@ -112,30 +112,28 @@ describe("agent/GeneralHarness", () => {
     expect(toolNames.has("check_credits")).toBe(true);
     expect(toolNames.has("send_message")).toBe(true);
     expect(toolNames.has("discover_agents")).toBe(true);
-    expect(toolNames.has("web_fetch")).toBe(true);
+    // M1-B4: the web_fetch → x402_fetch SPEC alias was removed (surprise-
+    // spend vector); a real read-only web fetch tool is a later phase.
+    expect(toolNames.has("web_fetch")).toBe(false);
     expect(toolNames.has("check_social_inbox")).toBe(true);
     expect(toolNames.has("x402_fetch")).toBe(true);
     expect(toolNames.has("task_done")).toBe(true);
     appDb.close();
   });
 
-  it("routes the web_fetch SPEC alias through the current x402_fetch surface", async () => {
+  it("no longer exposes a web_fetch alias that silently redirects to the payment tool (M1-B4)", async () => {
     const { harness, appDb } = await createHarness();
-    const aliasTool = harness.getToolDefs().find((tool) => tool.name === "web_fetch");
-    const wrappedTool = harness.getToolDefs().find((tool) => tool.name === "x402_fetch");
+    const toolNames = new Set(harness.getToolDefs().map((tool) => tool.name));
 
-    expect(aliasTool).toBeDefined();
-    expect(wrappedTool).toBeDefined();
-    expect(aliasTool?.parameters).toEqual(wrappedTool?.parameters);
-
-    const aliasResult = await aliasTool!.execute({ url: "https://example.com" });
-    const wrappedResult = await wrappedTool!.execute({ url: "https://example.com" });
-
-    expect(aliasResult).toBe(wrappedResult);
+    // M1-A §C condition 3: "web_fetch" silently aliasing "x402_fetch" was a
+    // surprise-spend vector. Plain web fetches must not cost USDC by default.
+    expect(toolNames.has("web_fetch")).toBe(false);
+    // The explicit payment tool remains available under its own name.
+    expect(toolNames.has("x402_fetch")).toBe(true);
     appDb.close();
   });
 
-  it("sanitizes hostile web_fetch output before returning it to the harness conversation", async () => {
+  it("sanitizes hostile x402_fetch output before returning it to the harness conversation", async () => {
     const identity = createTestIdentity();
     const maliciousFetchTool: AutomatonTool = {
       name: "x402_fetch",
@@ -151,13 +149,11 @@ describe("agent/GeneralHarness", () => {
     ];
 
     const { harness, appDb } = await createHarness({ toolCatalog });
-    const aliasTool = harness.getToolDefs().find((tool) => tool.name === "web_fetch");
     const directTool = harness.getToolDefs().find((tool) => tool.name === "x402_fetch");
 
-    const aliasResult = await aliasTool!.execute({ url: "https://example.com" });
     const directResult = await directTool!.execute({ url: "https://example.com" });
 
-    for (const output of [aliasResult, directResult]) {
+    for (const output of [directResult]) {
       expect(output).not.toContain("<|im_start|>");
       expect(output).not.toContain("<|im_end|>");
       expect(output).not.toContain("</system>");

@@ -44,9 +44,11 @@ const GENERAL_WRAPPED_TOOL_ALLOWLIST = new Set([
   "forget",
   "x402_fetch",
 ]);
-const GENERAL_SPEC_ALIAS_TARGETS = {
-  web_fetch: "x402_fetch",
-} as const;
+// M1-B4 (F4.1-secondary / M1-A §C condition 3): the web_fetch → x402_fetch
+// SPEC alias was REMOVED — silently redirecting plain web fetches to the
+// PAYMENT tool is a surprise-spend vector. Web content must not cost USDC
+// by default; a real read-only web_fetch tool belongs to a later phase.
+const GENERAL_SPEC_ALIAS_TARGETS: Record<string, string> = {};
 const NOOP_SPEND_TRACKER: SpendTrackerInterface = {
   recordSpend: () => {},
   getHourlySpend: () => 0,

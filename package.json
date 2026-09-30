@@ -17,6 +17,10 @@
     "./state/database.js": {
       "types": "./dist/state/database.d.ts",
       "default": "./dist/state/database.js"
+    },
+    "./net/policy.js": {
+      "types": "./dist/net/policy.d.ts",
+      "default": "./dist/net/policy.js"
     }
   },
   "bin": {

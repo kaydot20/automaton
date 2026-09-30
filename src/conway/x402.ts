@@ -14,11 +14,23 @@ import {
 } from "viem";
 import { base, baseSepolia } from "viem/chains";
 import { ResilientHttpClient } from "./http-client.js";
+import { assertOutboundAllowed } from "../net/policy.js";
 import { checkReserve, validateSpendCents } from "./reserve.js";
+import type { HttpClientConfig } from "../types.js";
 import { DEFAULT_TREASURY_POLICY } from "../types.js";
 import type { ChainType } from "../identity/chain.js";
 
 const x402HttpClient = new ResilientHttpClient();
+
+/**
+ * Optional per-call overrides for the x402 transport. The outbound-network
+ * policy (F4.3) runs on every request; payment-purpose calls additionally
+ * enforce the configured domain allowlist.
+ */
+export interface X402FetchOptions {
+  client?: ResilientHttpClient;
+  allowedDomains?: string[];
+}
 
 // USDC contract addresses
 const USDC_ADDRESSES: Record<string, Address> = {
@@ -338,6 +350,7 @@ export async function x402Fetch(
   maxPaymentCents?: number,
   chainType?: ChainType,
   skipReserveCheck?: boolean,
+  options?: X402FetchOptions,
 ): Promise<X402PaymentResult> {
   // Solana wallets cannot sign EVM x402 payments
   if (chainType === "solana") {
@@ -347,9 +360,38 @@ export async function x402Fetch(
     };
   }
 
+  // M1-B4 (F4.1/F4.3): SSRF gate BEFORE any request or signature. Static
+  // checks (scheme, literal private addresses like metadata endpoints,
+  // malformed hostnames) always run. The payment-purpose domain allowlist
+  // is enforced ONLY when the caller supplies one — the credit-topup income
+  // path (B2 self-rescue) targets the agent's own configured Conway API and
+  // must never be blocked by an absent allowlist.
+  const transport = options?.client ?? x402HttpClient;
+  const precheck = await assertOutboundAllowed(url, { purpose: "fetch" });
+  if (!precheck.allowed) {
+    return {
+      success: false,
+      error: precheck.message,
+      status: 0,
+    };
+  }
+  if (options?.allowedDomains !== undefined) {
+    const payCheck = await assertOutboundAllowed(url, {
+      purpose: "payment",
+      allowedDomains: options.allowedDomains,
+    });
+    if (!payCheck.allowed) {
+      return {
+        success: false,
+        error: payCheck.message,
+        status: 0,
+      };
+    }
+  }
+
   try {
-    // Initial request (non-mutating probe, uses resilient client)
-    const initialResp = await x402HttpClient.request(url, {
+    // Initial request (non-mutating probe, policy-checked transport)
+    const initialResp = await transport.request(url, {
       method,
       headers: { ...headers, "Content-Type": "application/json" },
       body,
@@ -445,7 +487,7 @@ export async function x402Fetch(
       JSON.stringify(payment),
     ).toString("base64");
 
-    const paidResp = await x402HttpClient.request(url, {
+    const paidResp = await transport.request(url, {
       method,
       headers: {
         ...headers,

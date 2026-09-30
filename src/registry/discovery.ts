@@ -15,6 +15,8 @@ import type {
 } from "../types.js";
 import { DEFAULT_DISCOVERY_CONFIG } from "../types.js";
 import { queryAgent, getTotalAgents, getRegisteredAgentsByEvents } from "./erc8004.js";
+import { ResilientHttpClient } from "../conway/http-client.js";
+import { isValidIpfsCid } from "../net/policy.js";
 import { keccak256, toBytes } from "viem";
 import { createLogger } from "../observability/logger.js";
 const logger = createLogger("registry.discovery");
@@ -23,6 +25,10 @@ type Network = "mainnet" | "testnet";
 
 // Overall discovery timeout (60 seconds)
 const DISCOVERY_TIMEOUT_MS = 60_000;
+
+// Shared policy-checked client for agent-card fetches (M1-B4 / F4.2):
+// manual redirect validation, per-hop outbound-network policy, timeouts.
+const cardHttpClient = new ResilientHttpClient({ maxRetries: 1 });
 
 // ─── SSRF Protection ────────────────────────────────────────────
 
@@ -316,11 +322,41 @@ export async function fetchAgentCard(
     return null;
   }
 
+  // M1-B4 (F4.2): IPFS CIDs are validated before being spliced into the
+  // gateway URL — previously arbitrary user URI text was concatenated.
+  if (uri.startsWith("ipfs://")) {
+    const cid = uri.slice("ipfs://".length).replace(/\/$/, "");
+    if (!isValidIpfsCid(cid)) {
+      logger.error(`Blocked ipfs:// URI with malformed CID: ${uri}`);
+      return null;
+    }
+  }
+
+  // M1-B4 (F4.2/F4.3): the outbound-network policy (static + configured DNS
+  // tiers) re-validates the URL on every hop through the shared client.
+  const staticCheck = await (async () => {
+    try {
+      const { assertOutboundAllowed } = await import("../net/policy.js");
+      return await assertOutboundAllowed(
+        uri.startsWith("ipfs://")
+          ? `${cfg.ipfsGateway}/ipfs/${uri.slice("ipfs://".length).replace(/\/$/, "")}`
+        : uri,
+        { purpose: "discovery" },
+      );
+    } catch {
+      return { allowed: false, code: "INVALID_URL", message: "policy check failed" } as const;
+    }
+  })();
+  if (!staticCheck.allowed) {
+    logger.error(`Blocked URI (outbound policy): ${uri}`);
+    return null;
+  }
+
   try {
     // Handle IPFS URIs - Phase 3.2: Configurable IPFS gateway
     let fetchUrl = uri;
     if (uri.startsWith("ipfs://")) {
-      fetchUrl = `${cfg.ipfsGateway}/ipfs/${uri.slice(7)}`;
+      fetchUrl = `${cfg.ipfsGateway}/ipfs/${uri.slice("ipfs://".length).replace(/\/$/, "")}`;
     }
 
     // Per-fetch timeout
@@ -328,7 +364,7 @@ export async function fetchAgentCard(
     const timer = setTimeout(() => controller.abort(), cfg.fetchTimeoutMs);
 
     try {
-      const response = await fetch(fetchUrl, {
+      const response = await cardHttpClient.request(fetchUrl, {
         signal: controller.signal,
       });
 
