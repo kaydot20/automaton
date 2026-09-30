@@ -14,6 +14,8 @@ import {
 } from "viem";
 import { base, baseSepolia } from "viem/chains";
 import { ResilientHttpClient } from "./http-client.js";
+import { checkReserve, validateSpendCents } from "./reserve.js";
+import { DEFAULT_TREASURY_POLICY } from "../types.js";
 import type { ChainType } from "../identity/chain.js";
 
 const x402HttpClient = new ResilientHttpClient();
@@ -161,7 +163,7 @@ function normalizePaymentRequired(raw: unknown): PaymentRequiredResponse | null 
   return { x402Version, accepts };
 }
 
-function parseMaxAmountRequired(maxAmountRequired: string, x402Version: number): bigint {
+export function parseMaxAmountRequired(maxAmountRequired: string, x402Version: number): bigint {
   const amount = maxAmountRequired.trim();
   if (!/^\d+(\.\d+)?$/.test(amount)) {
     throw new Error(`Invalid maxAmountRequired: ${maxAmountRequired}`);
@@ -186,6 +188,34 @@ function selectRequirement(parsed: PaymentRequiredResponse): PaymentRequirement 
 
 /** Solana USDC mint address (mainnet). */
 const SOLANA_USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+
+/**
+ * Get the raw USDC balance (atomic units, 6 decimals) for an address.
+ * Throws on RPC failure — callers decide how to degrade.
+ */
+async function getUsdcBalanceAtomic(
+  address: Address,
+  network: string = "eip155:8453",
+): Promise<bigint> {
+  const chain = CHAINS[network];
+  const usdcAddress = USDC_ADDRESSES[network];
+  if (!chain || !usdcAddress) {
+    throw new Error(`Unsupported USDC network: ${network}`);
+  }
+
+  const rpcUrl = process.env.AUTOMATON_RPC_URL || undefined;
+  const client = createPublicClient({
+    chain,
+    transport: http(rpcUrl, { timeout: 10_000 }),
+  });
+
+  return await client.readContract({
+    address: usdcAddress,
+    abi: BALANCE_OF_ABI,
+    functionName: "balanceOf",
+    args: [address],
+  });
+}
 
 /**
  * Get the USDC balance for the automaton's wallet on a given network.
@@ -246,34 +276,11 @@ export async function getUsdcBalanceDetailed(
   address: Address,
   network: string = "eip155:8453",
 ): Promise<UsdcBalanceResult> {
-  const chain = CHAINS[network];
-  const usdcAddress = USDC_ADDRESSES[network];
-  if (!chain || !usdcAddress) {
-    return {
-      balance: 0,
-      network,
-      ok: false,
-      error: `Unsupported USDC network: ${network}`,
-    };
-  }
-
   try {
-    const rpcUrl = process.env.AUTOMATON_RPC_URL || undefined;
-    const client = createPublicClient({
-      chain,
-      transport: http(rpcUrl, { timeout: 10_000 }),
-    });
-
-    const balance = await client.readContract({
-      address: usdcAddress,
-      abi: BALANCE_OF_ABI,
-      functionName: "balanceOf",
-      args: [address],
-    });
-
+    const balanceAtomic = await getUsdcBalanceAtomic(address, network);
     // USDC has 6 decimals
     return {
-      balance: Number(balance) / 1_000_000,
+      balance: Number(balanceAtomic) / 1_000_000,
       network,
       ok: true,
     };
@@ -309,6 +316,19 @@ export async function checkX402(
  * Fetch a URL with automatic x402 payment.
  * If the endpoint returns 402, sign and pay, then retry.
  */
+/**
+ * Fetch a URL with automatic x402 payment.
+ * If the endpoint returns 402, sign and pay, then retry.
+ *
+ * @param maxPaymentCents explicit per-payment cap in cents; a malformed
+ *   value (non-finite/negative) falls back to the conservative treasury
+ *   default rather than disabling the cap
+ * @param skipReserveCheck INTERNAL: used only by the credit-topup income
+ *   path (topupCredits), which enforces its own tier validation, solvency,
+ *   and cross-recipient reserve checks. Topup converts USDC into credits —
+ *   value does not leave the agent — so charging the USDC reserve against it
+ *   would create a starvation lock. Never expose this through tool args.
+ */
 export async function x402Fetch(
   url: string,
   account: PrivateKeyAccount,
@@ -317,6 +337,7 @@ export async function x402Fetch(
   headers?: Record<string, string>,
   maxPaymentCents?: number,
   chainType?: ChainType,
+  skipReserveCheck?: boolean,
 ): Promise<X402PaymentResult> {
   // Solana wallets cannot sign EVM x402 payments
   if (chainType === "solana") {
@@ -351,20 +372,55 @@ export async function x402Fetch(
       };
     }
 
-    // Check amount against maxPaymentCents BEFORE signing
-    if (maxPaymentCents !== undefined) {
-      const amountAtomic = parseMaxAmountRequired(
-        parsed.requirement.maxAmountRequired,
+    // Resolve the effective per-payment cap and check the amount BEFORE
+    // signing. A malformed configured cap falls back to the conservative
+    // treasury default (never permissive).
+    const effectiveMaxPaymentCents =
+      validateSpendCents(maxPaymentCents) ??
+      DEFAULT_TREASURY_POLICY.maxX402PaymentCents;
+    const amountAtomic = parseMaxAmountRequired(
+      parsed.requirement.maxAmountRequired,
+      parsed.x402Version,
+    );
+    // Convert atomic units (6 decimals) to cents (2 decimals)
+    const amountCents = Number(amountAtomic) / 10_000;
+    if (!(Number.isFinite(amountCents) && amountCents >= 0)) {
+      return {
+        success: false,
+        error: `Invalid payment amount required: ${parsed.requirement.maxAmountRequired}`,
+        status: 402,
+      };
+    }
+    if (amountCents > effectiveMaxPaymentCents) {
+      return {
+        success: false,
+        error: `Payment of ${amountCents.toFixed(2)} cents exceeds max allowed ${effectiveMaxPaymentCents} cents`,
+        status: 402,
+      };
+    }
+
+    // Minimum reserve invariant: paying must not push the wallet below the
+    // configured USDC reserve. Skipped only for the internal credit-topup
+    // income path (see skipReserveCheck doc above).
+    if (!skipReserveCheck) {
+      const { balanceCents, paymentAmountCents } = await checkUsdcReserveBeforeSigning(
+        account,
+        parsed.requirement,
         parsed.x402Version,
       );
-      // Convert atomic units (6 decimals) to cents (2 decimals)
-      const amountCents = Number(amountAtomic) / 10_000;
-      if (amountCents > maxPaymentCents) {
-        return {
-          success: false,
-          error: `Payment of ${amountCents.toFixed(2)} cents exceeds max allowed ${maxPaymentCents} cents`,
-          status: 402,
-        };
+      if (balanceCents !== null && paymentAmountCents !== null) {
+        const reserveCheck = checkReserve(
+          paymentAmountCents,
+          balanceCents,
+          DEFAULT_TREASURY_POLICY.minimumReserveCents,
+        );
+        if (!reserveCheck.allowed) {
+          return {
+            success: false,
+            error: reserveCheck.message,
+            status: 402,
+          };
+        }
       }
     }
 
@@ -448,6 +504,68 @@ async function parsePaymentRequired(
   }
 }
 
+/**
+ * Check USDC balance and parse the payment amount before signing.
+ *
+ * Returns { balanceCents, paymentAmountCents } when the reserve invariant
+ * can be evaluated. Returns { balanceCents: null, paymentAmountCents: null }
+ * when the balance is unavailable (transient RPC failure) or the payment is
+ * not USDC — the reserve check is skipped in those cases (fail-open ONLY for
+ * unavailable data, never for malformed data).
+ */
+async function checkUsdcReserveBeforeSigning(
+  account: PrivateKeyAccount,
+  requirement: PaymentRequirement,
+  x402Version: number,
+): Promise<{
+  balanceCents: number | null;
+  paymentAmountCents: number | null;
+}> {
+  // The reserve invariant is defined over USDC only. Payments in a different
+  // asset cannot be compared to the USDC reserve.
+  if (
+    requirement.usdcAddress.toLowerCase() !==
+    USDC_ADDRESSES[requirement.network]?.toLowerCase()
+  ) {
+    return { balanceCents: null, paymentAmountCents: null };
+  }
+
+  let balanceCents: number;
+  try {
+    const balanceAtomic = await getUsdcBalanceAtomic(
+      account.address,
+      requirement.network,
+    );
+    // Atomic (6 decimals) → cents (2 decimals) via exact BigInt floor
+    // division: deterministic, and rounds only AGAINST the spender's
+    // balance, so floating-point drift can never flip a denial into an
+    // allowance at the boundary.
+    balanceCents = Number(balanceAtomic / 10_000n);
+  } catch {
+    // Balance source unavailable (RPC failure): skip reserve enforcement
+    // for this payment rather than false-blocking on infrastructure
+    // failure. A malformed amount is still caught below.
+    return { balanceCents: null, paymentAmountCents: null };
+  }
+
+  let amountAtomic: bigint;
+  try {
+    amountAtomic = parseMaxAmountRequired(
+      requirement.maxAmountRequired,
+      x402Version,
+    );
+  } catch {
+    // parseMaxAmountRequired is re-validated inside signPayment; a
+    // malformed amount will fail signing downstream.
+    return { balanceCents: null, paymentAmountCents: null };
+  }
+  // Ceil the payment into whole cents: a sub-cent payment rounds UP against
+  // the spender, so a 0.4-cent payment cannot slip under a reserve boundary
+  // that the true (fractional-cent) post-spend balance would violate.
+  const paymentAmountCents = Number((amountAtomic + 9_999n) / 10_000n);
+  return { balanceCents, paymentAmountCents };
+}
+
 async function signPayment(
   account: PrivateKeyAccount,
   requirement: PaymentRequirement,
@@ -455,7 +573,7 @@ async function signPayment(
 ): Promise<any> {
   const chain = CHAINS[requirement.network];
   if (!chain) {
-    throw new Error(`Unsupported network: ${requirement.network}`);
+    throw new Error(`Unsupported payment network: ${requirement.network}`);
   }
 
   const nonce = `0x${Buffer.from(

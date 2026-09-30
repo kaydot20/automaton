@@ -19,8 +19,10 @@ import type {
   InputSource,
   SpendTrackerInterface,
 } from "../types.js";
+import { DEFAULT_TREASURY_POLICY } from "../types.js";
 import type { PolicyEngine } from "./policy-engine.js";
 import { sanitizeToolResult, sanitizeInput } from "./injection-defense.js";
+import { checkReserve } from "../conway/reserve.js";
 import { createLogger } from "../observability/logger.js";
 
 const logger = createLogger("tools");
@@ -1021,6 +1023,15 @@ Model: ${ctx.inference.getDefaultModel()}
           return `Blocked: Cannot transfer more than half your balance ($${(balance / 100).toFixed(2)}). Self-preservation.`;
         }
 
+        // Minimum reserve invariant: post-spend balance must stay >= configured reserve.
+        const reserveCents =
+          ctx.config.treasuryPolicy?.minimumReserveCents ??
+          DEFAULT_TREASURY_POLICY.minimumReserveCents;
+        const reserveCheck = checkReserve(amount, balance, reserveCents);
+        if (!reserveCheck.allowed) {
+          return reserveCheck.message;
+        }
+
         const transfer = await ctx.conway.transferCredits(
           args.to_address as string,
           amount,
@@ -1757,6 +1768,15 @@ Model: ${ctx.inference.getDefaultModel()}
         const balance = await ctx.conway.getCreditsBalance();
         if (amount > balance / 2) {
           return `Blocked: Cannot transfer more than half your balance. Self-preservation.`;
+        }
+
+        // Minimum reserve invariant: post-spend balance must stay >= configured reserve.
+        const reserveCents =
+          ctx.config.treasuryPolicy?.minimumReserveCents ??
+          DEFAULT_TREASURY_POLICY.minimumReserveCents;
+        const reserveCheck = checkReserve(amount, balance, reserveCents);
+        if (!reserveCheck.allowed) {
+          return reserveCheck.message;
         }
 
         const transfer = await ctx.conway.transferCredits(

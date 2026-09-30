@@ -216,7 +216,7 @@ describe("orchestration/SimpleFundingProtocol", () => {
   it("fundChild calls transferCredits with the correct amount", async () => {
     const mockConway = {
       transferCredits: vi.fn().mockResolvedValue({ status: "ok", amountCents: 100 }),
-      getCreditsBalance: vi.fn().mockResolvedValue(500),
+      getCreditsBalance: vi.fn().mockResolvedValue(5000),
     } as any;
 
     const identity = { address: "0xparent" } as any;
@@ -235,6 +235,7 @@ describe("orchestration/SimpleFundingProtocol", () => {
   it("fundChild updates funded_amount_cents in the children table on success", async () => {
     const mockConway = {
       transferCredits: vi.fn().mockResolvedValue({ status: "ok" }),
+      getCreditsBalance: vi.fn().mockResolvedValue(5000),
     } as any;
 
     const identity = { address: "0xparent" } as any;
@@ -264,7 +265,7 @@ describe("orchestration/SimpleFundingProtocol", () => {
   it("fundChild returns success:false when transferCredits throws", async () => {
     const mockConway = {
       transferCredits: vi.fn().mockRejectedValue(new Error("network failure")),
-      getCreditsBalance: vi.fn().mockResolvedValue(200),
+      getCreditsBalance: vi.fn().mockResolvedValue(5000),
     } as any;
 
     const identity = { address: "0xparent" } as any;
@@ -273,6 +274,79 @@ describe("orchestration/SimpleFundingProtocol", () => {
     const result = await funding.fundChild("0xchild", 50);
 
     expect(result.success).toBe(false);
+  });
+
+  // ─── Minimum reserve gate (M1-B2) ───────────────────────────────
+
+  it("fundChild denies when post-spend balance would drop below the reserve", async () => {
+    // Balance 1500, reserve 1000: spending 600 leaves 900 < 1000 → denied.
+    const mockConway = {
+      transferCredits: vi.fn(),
+      getCreditsBalance: vi.fn().mockResolvedValue(1500),
+    } as any;
+    const funding = new SimpleFundingProtocol(mockConway, { address: "0xparent" } as any, makeMockDb(fundingDb));
+
+    const result = await funding.fundChild("0xchild", 600);
+
+    expect(result.success).toBe(false);
+    expect(mockConway.transferCredits).not.toHaveBeenCalled();
+  });
+
+  it("fundChild allows spend landing exactly at the reserve (inclusive boundary)", async () => {
+    // Balance 1100, reserve 1000: spending 100 leaves exactly 1000 → allowed.
+    const mockConway = {
+      transferCredits: vi.fn().mockResolvedValue({ status: "ok" }),
+      getCreditsBalance: vi.fn().mockResolvedValue(1100),
+    } as any;
+    const funding = new SimpleFundingProtocol(mockConway, { address: "0xparent" } as any, makeMockDb(fundingDb));
+
+    const result = await funding.fundChild("0xchild", 100);
+
+    expect(result.success).toBe(true);
+    expect(mockConway.transferCredits).toHaveBeenCalledWith("0xchild", 100, "Task funding from orchestrator");
+  });
+
+  it("fundChild denies one cent below the reserve boundary", async () => {
+    // Balance 1100, reserve 1000: spending 101 leaves 999 → denied.
+    const mockConway = {
+      transferCredits: vi.fn(),
+      getCreditsBalance: vi.fn().mockResolvedValue(1100),
+    } as any;
+    const funding = new SimpleFundingProtocol(mockConway, { address: "0xparent" } as any, makeMockDb(fundingDb));
+
+    const result = await funding.fundChild("0xchild", 101);
+
+    expect(result.success).toBe(false);
+    expect(mockConway.transferCredits).not.toHaveBeenCalled();
+  });
+
+  it("fundChild denies malformed amounts (NaN, negative, infinite) without a balance fetch", async () => {
+    const mockConway = {
+      transferCredits: vi.fn(),
+      getCreditsBalance: vi.fn(),
+    } as any;
+    const funding = new SimpleFundingProtocol(mockConway, { address: "0xparent" } as any, makeMockDb(fundingDb));
+
+    for (const bad of [Number.NaN, -1, Number.POSITIVE_INFINITY, "100", null]) {
+      const result = await funding.fundChild("0xchild", bad as any);
+      expect(result.success).toBe(false);
+    }
+    expect(mockConway.transferCredits).not.toHaveBeenCalled();
+    // Fail-closed: no transfer attempted, so no balance was even needed.
+    expect(mockConway.getCreditsBalance).not.toHaveBeenCalled();
+  });
+
+  it("fundChild denies when the balance source fails (fail-closed)", async () => {
+    const mockConway = {
+      transferCredits: vi.fn(),
+      getCreditsBalance: vi.fn().mockRejectedValue(new Error("api down")),
+    } as any;
+    const funding = new SimpleFundingProtocol(mockConway, { address: "0xparent" } as any, makeMockDb(fundingDb));
+
+    const result = await funding.fundChild("0xchild", 100);
+
+    expect(result.success).toBe(false);
+    expect(mockConway.transferCredits).not.toHaveBeenCalled();
   });
 
   it("getBalance returns funded_amount_cents from the children table", async () => {

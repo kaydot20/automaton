@@ -6,6 +6,8 @@ import type {
   ConwayClient,
 } from "../types.js";
 import type { AgentTracker, FundingProtocol } from "./types.js";
+import { checkReserve } from "../conway/reserve.js";
+import { DEFAULT_TREASURY_POLICY } from "../types.js";
 
 const IDLE_STATUSES = new Set<ChildStatus>(["running", "healthy"]);
 
@@ -86,9 +88,34 @@ export class SimpleFundingProtocol implements FundingProtocol {
   ) {}
 
   async fundChild(childAddress: string, amountCents: number): Promise<{ success: boolean }> {
-    const transferAmount = Math.max(0, Math.floor(amountCents));
+    // Fail-closed numeric validation: malformed / negative / NaN / infinite
+    // / non-numeric amounts are denied (no silent Math.floor coercion).
+    if (typeof amountCents !== "number" || !Number.isFinite(amountCents) || amountCents < 0) {
+      return { success: false };
+    }
+    const transferAmount = Math.floor(amountCents);
     if (transferAmount === 0) {
       return { success: true };
+    }
+
+    // Minimum reserve invariant: the orchestrator helper previously had no
+    // balance or reserve check at all — a direct bypass of the per-tool gates.
+    // Resolve the authoritative balance and enforce the same shared guard as
+    // transfer_credits / fund_child / x402. An unavailable balance (negative
+    // sentinel) denies fail-closed.
+    let balanceCents: number;
+    try {
+      balanceCents = await this.conway.getCreditsBalance();
+    } catch {
+      return { success: false };
+    }
+    const reserveCheck = checkReserve(
+      transferAmount,
+      balanceCents,
+      DEFAULT_TREASURY_POLICY.minimumReserveCents,
+    );
+    if (!reserveCheck.allowed) {
+      return { success: false };
     }
 
     try {

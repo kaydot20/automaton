@@ -15,6 +15,8 @@
 
 import type { PrivateKeyAccount, Address } from "viem";
 import { x402Fetch, getUsdcBalance } from "./x402.js";
+import { checkReserve, validateSpendCents } from "./reserve.js";
+import { DEFAULT_TREASURY_POLICY } from "../types.js";
 import { createLogger } from "../observability/logger.js";
 import type { ChainType } from "../identity/chain.js";
 
@@ -35,6 +37,15 @@ export interface TopupResult {
  *
  * Calls GET /pay/{amountUsd}/{address} which returns HTTP 402.
  * x402Fetch handles the payment signing and retry automatically.
+ *
+ * Reserve reconciliation: topup converts USDC into Conway credits, i.e. it
+ * INCREASES the authoritative (credit) balance. The minimum reserve is
+ * therefore not charged against the payment itself — doing so would make the
+ * reserve a starvation lock (an agent in critical tier could never buy
+ * credits). Instead, topup is bounded so it cannot be abused as a laundering
+ * channel: (1) `amountUsd` must be a valid tier; (2) the resulting on-chain
+ * USDC balance must stay >= the reserve; (3) the credit side of the exchange
+ * is validated when the server reports it.
  */
 export async function topupCredits(
   apiUrl: string,
@@ -43,30 +54,123 @@ export async function topupCredits(
   recipientAddress?: Address,
 ): Promise<TopupResult> {
   const address = recipientAddress || account.address;
-  const url = `${apiUrl}/pay/${amountUsd}/${address}`;
 
-  logger.info(`Attempting credit topup: $${amountUsd} USD for ${address}`);
+  // Fail-closed: a malformed tier amount can never be converted into a signed
+  // payment. Callers (topup_credits tool) pre-validate tiers; this guards the
+  // helper-level path (auto-topup, orchestrator) as well.
+  const validatedAmountUsd = validateSpendCents(amountUsd);
+  if (validatedAmountUsd === null || !TOPUP_TIERS.includes(validatedAmountUsd)) {
+    logger.error(
+      `Credit topup blocked: malformed or invalid tier amount ${JSON.stringify(amountUsd) ?? String(amountUsd)}`,
+    );
+    return {
+      success: false,
+      amountUsd,
+      error: `Invalid topup amount: must be a finite non-negative tier amount (${TOPUP_TIERS.join(", ")}).`,
+    };
+  }
 
-  const result = await x402Fetch(url, account, "GET");
+  // On-chain USDC guard (fail-closed on unavailable/malformed balance):
+  // - Self-topup (default): converts the agent's own USDC into its own
+  //   credits — value never leaves the agent, so the reserve is NOT charged
+  //   (that would be a starvation lock). A plain solvency check applies:
+  //   the wallet must actually cover the payment.
+  // - Cross-recipient topup: credits land in another party's account, so
+  //   this is genuine outbound spend and the full reserve invariant applies
+  //   (post-payment wallet USDC must stay >= reserve).
+  let usdcBalance: number;
+  try {
+    usdcBalance = await getUsdcBalance(account.address);
+  } catch (err: any) {
+    logger.warn(`Credit topup blocked: failed to check USDC balance: ${err.message}`);
+    return {
+      success: false,
+      amountUsd: validatedAmountUsd,
+      error: "Failed to check USDC balance before topup.",
+    };
+  }
+
+  const isCrossRecipient =
+    recipientAddress !== undefined &&
+    recipientAddress.toLowerCase() !== account.address.toLowerCase();
+
+  if (isCrossRecipient) {
+    const reserveCheck = checkReserve(
+      validatedAmountUsd,
+      usdcBalance,
+      DEFAULT_TREASURY_POLICY.minimumReserveCents / 100,
+    );
+    if (!reserveCheck.allowed) {
+      logger.warn(`Credit topup blocked by reserve invariant: ${reserveCheck.message}`);
+      return {
+        success: false,
+        amountUsd: validatedAmountUsd,
+        error: reserveCheck.message,
+      };
+    }
+  } else if (!(typeof usdcBalance === "number" &&
+    Number.isFinite(usdcBalance) &&
+    usdcBalance >= validatedAmountUsd)) {
+    logger.warn(
+      `Credit topup blocked: USDC balance ${usdcBalance} does not cover $${validatedAmountUsd}`,
+    );
+    return {
+      success: false,
+      amountUsd: validatedAmountUsd,
+      error: `Insufficient USDC: balance ${usdcBalance}, required $${validatedAmountUsd}.`,
+    };
+  }
+
+  const url = `${apiUrl}/pay/${validatedAmountUsd}/${address}`;
+
+  logger.info(`Attempting credit topup: $${validatedAmountUsd} USD for ${address}`);
+
+  // skipReserveCheck: topup is the USDC→credits income path. Its protections
+  // are (1) tier validation, (2) the solvency / cross-recipient reserve
+  // checks above, and (3) the x402 per-payment cap passed explicitly here
+  // (largest valid tier). x402Fetch's USDC reserve check is skipped because
+  // a self-topup must remain possible when credits are critical — the exact
+  // situation the reserve exists to survive.
+  const result = await x402Fetch(
+    url,
+    account,
+    "GET",
+    undefined,
+    undefined,
+    TOPUP_TIERS[TOPUP_TIERS.length - 1],
+    undefined,
+    true,
+  );
 
   if (!result.success) {
     logger.error(`Credit topup failed: ${result.error}`);
     return {
       success: false,
-      amountUsd,
+      amountUsd: validatedAmountUsd,
       error: result.error || `HTTP ${result.status}`,
     };
   }
 
-  const creditsCentsAdded = typeof result.response === "object"
-    ? result.response?.credits_cents ?? result.response?.amount_cents ?? amountUsd * 100
-    : amountUsd * 100;
+  const rawCreditsAdded = typeof result.response === "object"
+    ? result.response?.credits_cents ?? result.response?.amount_cents ?? validatedAmountUsd * 100
+    : validatedAmountUsd * 100;
 
-  logger.info(`Credit topup successful: $${amountUsd} USD → ${creditsCentsAdded} credits cents`);
+  // Validate the credit side of the exchange: the server-reported credit
+  // credit must be a finite non-negative number. A malformed value is treated
+  // as zero credit added (no economic trust in malformed data), not coerced.
+  const validatedCreditsAdded = validateSpendCents(rawCreditsAdded);
+  const creditsCentsAdded = validatedCreditsAdded ?? 0;
+  if (validatedCreditsAdded === null) {
+    logger.warn(
+      `Topup response contained malformed credits_cents (${JSON.stringify(rawCreditsAdded) ?? String(rawCreditsAdded)}); recording 0 credit cents added.`,
+    );
+  }
+
+  logger.info(`Credit topup successful: $${validatedAmountUsd} USD → ${creditsCentsAdded} credits cents`);
 
   return {
     success: true,
-    amountUsd,
+    amountUsd: validatedAmountUsd,
     creditsCentsAdded,
   };
 }
