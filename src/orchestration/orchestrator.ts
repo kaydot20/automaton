@@ -26,6 +26,7 @@ import { ColonyMessaging, type AgentMessage } from "./messaging.js";
 import { generateTodoMd } from "./attention.js";
 import { UnifiedInferenceClient } from "../inference/inference-client.js";
 import { isBudgetCeilingDenial, reviewPlan } from "./plan-mode.js";
+import { sanitizeToolResult } from "../agent/injection-defense.js";
 import { buildPlannerContext, getNextPlannerVersion, persistPlannerArtifacts } from "./planner-context.js";
 import { AgentWorkspace } from "./workspace.js";
 import {
@@ -288,6 +289,14 @@ export class Orchestrator {
 
       const parsed = parseTaskResultMessage(entry.message);
       if (!parsed) {
+        continue;
+      }
+
+      // F3.2: only accept results for tasks that exist in THIS orchestrator's
+      // task graph. A spoofed or foreign taskId must not be able to inject a
+      // result (or funding/next-stage side effects) into goal state.
+      const taskRow = getTaskById(this.params.db, parsed.taskId);
+      if (!taskRow) {
         continue;
       }
 
@@ -1177,21 +1186,25 @@ function parseTaskResultMessage(message: AgentMessage): TaskResultEnvelope | nul
   const payload = safeJsonParse(message.content);
   const fallbackTaskId = typeof message.taskId === "string" ? message.taskId : null;
 
+  // F3.2 fail-closed: a malformed result envelope can never be promoted to a
+  // success. Without a taskId there is no graph edge to attribute the result
+  // to, so the message is dropped (null) rather than guessed.
   if (!payload || typeof payload !== "object") {
     if (!fallbackTaskId) {
       return null;
     }
 
     return {
-      taskId: fallbackTaskId,
+      taskId: fallbackTaskId, // validated against the task graph by collectResults
       goalId: message.goalId,
       result: {
-        success: true,
-        output: message.content,
+        success: false,
+        output: sanitizeToolResult(message.content),
         artifacts: [],
         costCents: 0,
         duration: 0,
       },
+      error: sanitizeToolResult(message.content),
     };
   }
 
@@ -1205,8 +1218,15 @@ function parseTaskResultMessage(message: AgentMessage): TaskResultEnvelope | nul
     return null;
   }
 
-  const success = firstBoolean(nested.success, obj.success, true);
-  const output = firstString(nested.output, obj.output, success ? "ok" : "task failed") ?? "";
+  // F3.2 fail-closed: missing/unparseable success is a FAILURE, never a
+  // success. A result that cannot even declare its own outcome must not be
+  // able to complete a task and release funding/next-stage execution.
+  const success = firstBoolean(nested.success, obj.success, false);
+  // F3.2: worker-reported output is untrusted content — sanitize through the
+  // universal taint pass before it is persisted or rendered to the planner.
+  const output = sanitizeToolResult(
+    firstString(nested.output, obj.output, success ? "ok" : "task failed") ?? "",
+  );
 
   const result: TaskResult = {
     success,
@@ -1217,10 +1237,12 @@ function parseTaskResultMessage(message: AgentMessage): TaskResultEnvelope | nul
   };
 
   return {
-    taskId,
+    taskId, // validated against the task graph by collectResults
     goalId: message.goalId,
     result,
-    error: success ? undefined : (firstString(obj.error, output) ?? undefined),
+    error: success
+      ? undefined
+      : sanitizeToolResult(firstString(obj.error, output) ?? "task failed"),
   };
 }
 

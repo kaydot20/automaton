@@ -52,12 +52,25 @@ function confinePathToSandbox(filePath: string): string | { error: string } {
   return resolved;
 }
 
-// Tools whose results come from external sources and need sanitization
-const EXTERNAL_SOURCE_TOOLS = new Set([
-  "exec",
-  "web_fetch",
-  "check_social_inbox",
+// ─── Tool Result Sanitization (F3.1: universal taint boundary) ───
+// DEFAULT-DENY: every tool result is untrusted by default and passes
+// through sanitizeToolResult() in executeTool() before reaching the model.
+// Only tools whose results are entirely locally synthesized from typed
+// state (numbers, booleans, fixed labels) may opt out — their output
+// cannot carry third-party content. Everything else (exec, x402 bodies
+// and errors, agent cards, git output, skill echoes, MCP/custom tools,
+// file reads) is sanitized.
+const TRUSTED_LOCAL_TOOLS = new Set([
+  "sleep",              // fixed confirmation string
+  "check_credits",      // formatted local balance
+  "check_usdc_balance", // formatted on-chain scalar
+  "list_children",      // local DB rows
 ]);
+
+/** True when a tool's result may bypass result sanitization. */
+export function isToolResultTrusted(toolName: string): boolean {
+  return TRUSTED_LOCAL_TOOLS.has(toolName);
+}
 
 // ─── Self-Preservation Guard ───────────────────────────────────
 // Defense-in-depth: policy engine (command.forbidden_patterns rule) is the primary guard.
@@ -3332,7 +3345,7 @@ export async function executeTool(
       arguments: args,
       result: "",
       durationMs: 0,
-      error: `Unknown tool: ${toolName}`,
+      error: sanitizeToolResult(`Unknown tool: ${toolName}`),
     };
   }
 
@@ -3354,7 +3367,9 @@ export async function executeTool(
         arguments: args,
         result: "",
         durationMs: Date.now() - startTime,
-        error: `Policy denied: ${decision.reasonCode} — ${decision.humanMessage}`,
+        error: sanitizeToolResult(
+          `Policy denied: ${decision.reasonCode} — ${decision.humanMessage}`,
+        ),
       };
     }
   }
@@ -3362,8 +3377,11 @@ export async function executeTool(
   try {
     let result = await tool.execute(args, context);
 
-    // Sanitize results from external source tools
-    if (EXTERNAL_SOURCE_TOOLS.has(toolName)) {
+    // F3.1: sanitize every tool result unless the tool is on the
+    // trusted-local allowlist. One choke point covers exec output,
+    // x402 bodies/errors, agent cards, git output, skill echoes,
+    // MCP/custom tool results, and file reads.
+    if (!isToolResultTrusted(toolName)) {
       result = sanitizeToolResult(result);
     }
 
@@ -3425,7 +3443,7 @@ export async function executeTool(
       arguments: args,
       result: "",
       durationMs: Date.now() - startTime,
-      error: err.message || String(err),
+      error: sanitizeToolResult(err.message || String(err)),
     };
   }
 }
