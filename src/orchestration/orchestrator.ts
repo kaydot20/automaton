@@ -25,7 +25,7 @@ import {
 import { ColonyMessaging, type AgentMessage } from "./messaging.js";
 import { generateTodoMd } from "./attention.js";
 import { UnifiedInferenceClient } from "../inference/inference-client.js";
-import { reviewPlan } from "./plan-mode.js";
+import { isBudgetCeilingDenial, reviewPlan } from "./plan-mode.js";
 import { buildPlannerContext, getNextPlannerVersion, persistPlannerArtifacts } from "./planner-context.js";
 import { AgentWorkspace } from "./workspace.js";
 import {
@@ -48,8 +48,24 @@ const logger = createLogger("orchestration.orchestrator");
 
 const ORCHESTRATOR_STATE_KEY = "orchestrator.state";
 const ORCHESTRATOR_TODO_KEY = "orchestrator.todo_md";
+const BUDGET_REJECTION_COUNT_KEY_PREFIX = "orchestrator.budget_rejections.";
+const BUDGET_ESCALATION_KEY_PREFIX = "orchestrator.budget_escalation.";
 const DEFAULT_TASK_FUNDING_CENTS = 25;
 const DEFAULT_MAX_REPLANS = 3;
+
+/**
+ * Plan-review budget decisions are deterministic (code, not model reasoning).
+ * A budget rejection is allowed at most ONE bounded cheaper-plan attempt;
+ * a second consecutive rejection pauses the goal via the existing "paused"
+ * status (a non-looping defer) and blocks its pending tasks.
+ */
+const MAX_BUDGET_REPLANS = 1;
+
+/** Existing non-looping goal state for budget-blocked goals (owner can resume). */
+const BUDGET_BLOCKED_GOAL_STATUS = "paused" as const;
+
+/** Existing non-looping task state for blocked tasks. */
+const BUDGET_BLOCKED_TASK_STATUS = "blocked" as const;
 
 type ExecutionPhase =
   | "idle"
@@ -491,12 +507,27 @@ export class Orchestrator {
       });
 
       if (result.approved) {
+        // An approved (within-ceiling) plan clears any prior rejection history
+        // for this goal so a past budget rejection cannot poison future work.
+        if (state.goalId) {
+          this.params.db.prepare("DELETE FROM kv WHERE key = ?").run(
+            `${BUDGET_REJECTION_COUNT_KEY_PREFIX}${state.goalId}`,
+          );
+        }
         return { ...state, phase: "executing" };
       }
 
+      // Persist reviewer feedback for operator visibility (informational only;
+      // the deterministic reason code is the policy mechanism).
       this.params.db.prepare(
         "INSERT OR REPLACE INTO kv (key, value, updated_at) VALUES (?, ?, datetime('now'))",
       ).run(`orchestrator.review_feedback.${state.goalId}`, result.feedback ?? "Plan rejected");
+
+      // Deterministic budget-ceiling/cost-integrity denial: allow at most one
+      // bounded cheaper-plan attempt. The model cannot reason its way past this gate.
+      if (isBudgetCeilingDenial(result.reason)) {
+        return this.handleBudgetRejection(state, result.reason);
+      }
 
       return { ...state, phase: "planning" };
     } catch (error) {
@@ -506,6 +537,79 @@ export class Orchestrator {
       }
       throw error;
     }
+  }
+
+  /**
+   * Deterministic handling of a budget-ceiling/cost-integrity rejection
+   * (PLAN_BUDGET_EXCEEDED, PLAN_COST_INVALID, or PLAN_COST_MISMATCH).
+   *
+   * The plan may receive at most MAX_BUDGET_REPLANS bounded attempts to produce
+   * a cheaper plan (fresh tasks are written by the planning phase). If the
+   * budget is exceeded again, the goal is paused via the existing non-looping
+   * "paused" status, its pending tasks are marked "blocked", and an escalation
+   * record is written for the owner. Raising the ceiling is an owner/governance
+   * action, not something the model can do.
+   */
+  private handleBudgetRejection(state: OrchestratorState, denialReason: string | undefined): OrchestratorState {
+    const goalId = state.goalId;
+    if (!goalId) {
+      return { ...state, phase: "failed" };
+    }
+
+    const countKey = `${BUDGET_REJECTION_COUNT_KEY_PREFIX}${goalId}`;
+    const previousRow = this.params.db.prepare(
+      "SELECT value FROM kv WHERE key = ?",
+    ).get(countKey) as { value: string } | undefined;
+    const parsedCount = previousRow?.value === undefined ? 0 : Number(previousRow.value);
+    const rejectionCount = (Number.isFinite(parsedCount) ? parsedCount : 0) + 1;
+    this.params.db.prepare(
+      "INSERT OR REPLACE INTO kv (key, value, updated_at) VALUES (?, ?, datetime('now'))",
+    ).run(countKey, String(rejectionCount));
+
+    if (rejectionCount <= MAX_BUDGET_REPLANS) {
+      logger.warn("Plan exceeded autonomous budget ceiling, requesting one cheaper plan", {
+        goalId,
+        rejectionCount,
+        maxBudgetReplans: MAX_BUDGET_REPLANS,
+      });
+      return { ...state, phase: "planning" };
+    }
+
+    // Budget still exceeded after the bounded retry: stop planning, defer the
+    // goal deterministically. No further planning ticks occur for this goal.
+    this.params.db.prepare(
+      "UPDATE task_graph SET status = ? WHERE goal_id = ? AND status = 'pending'",
+    ).run(BUDGET_BLOCKED_TASK_STATUS, goalId);
+
+    updateGoalStatus(this.params.db, goalId, BUDGET_BLOCKED_GOAL_STATUS);
+
+    this.params.db.prepare(
+      "INSERT OR REPLACE INTO kv (key, value, updated_at) VALUES (?, ?, datetime('now'))",
+    ).run(
+      `${BUDGET_ESCALATION_KEY_PREFIX}${goalId}`,
+      JSON.stringify({
+        code: denialReason ?? "PLAN_BUDGET_EXCEEDED",
+        goalId,
+        action: "goal_paused_tasks_blocked",
+        reason: "Plan still fails the deterministic cost/budget gate after the bounded cheaper-plan retry.",
+        resolution: "Owner/governance approval required to raise the ceiling or authorize the plan.",
+        rejectedAt: new Date().toISOString(),
+      }),
+    );
+
+    logger.warn("Plan exceeded autonomous budget ceiling after bounded retry, pausing goal", {
+      goalId,
+      rejectionCount,
+    });
+
+    return {
+      ...state,
+      phase: "idle",
+      goalId: null,
+      replanCount: 0,
+      failedTaskId: null,
+      failedError: null,
+    };
   }
 
   private async handleExecutingPhase(

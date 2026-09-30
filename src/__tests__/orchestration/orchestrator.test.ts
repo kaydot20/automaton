@@ -708,18 +708,119 @@ describe("orchestration/Orchestrator", () => {
       storePlan(db, goalId);
       setOrchestratorState(db, { phase: "plan_review", goalId, replanCount: 0, failedTaskId: null, failedError: null });
 
-      // We need reviewPlan to throw "awaiting human approval". The orchestrator calls it with mode: "auto".
-      // To get supervised behavior we mock the plan-mode module.
-      // The simplest way: store a plan that will trigger the supervised path by mocking vi.mock at module level.
-      // Instead we test the error-catch path by making the orchestrator's handlePlanReviewPhase catch it:
-      // The orchestrator calls reviewPlan with mode:"auto". In auto mode it always approves.
-      // To test supervised mode catching, we verify the catch branch indirectly:
-      // inject a plan with a very high cost to ensure the auto-approve path runs.
-      storePlan(db, goalId, { estimatedTotalCostCents: 9999 });
+      // The orchestrator always calls reviewPlan with mode: "auto". To exercise
+      // the await-human-approval catch branch we mock the plan-mode module here.
+      const reviewPlan = await import("../../orchestration/plan-mode.js");
+      const spy = vi.spyOn(reviewPlan, "reviewPlan").mockRejectedValue(new Error("awaiting human approval"));
+      try {
+        const orc = makeOrchestrator(db);
+        const result = await orc.tick();
+        expect(result.phase).toBe("plan_review");
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it("first budget rejection triggers exactly one bounded cheaper-plan replan", async () => {
+      const goalId = insertGoal(db);
+      insertTask(db, { goalId, title: "t1", description: "desc" });
+
+      storePlan(db, goalId, { estimatedTotalCostCents: 9000 }); // above ceiling (5000)
+      setOrchestratorState(db, { phase: "plan_review", goalId, replanCount: 0, failedTaskId: null, failedError: null });
+
       const orc = makeOrchestrator(db);
       const result = await orc.tick();
-      // auto mode approves above threshold too, so we get executing
+
+      // Rejection #1 -> exactly one bounded replan attempt (planning phase).
+      expect(result.phase).toBe("planning");
+
+      const countRow = db.prepare("SELECT value FROM kv WHERE key = ?").get(`orchestrator.budget_rejections.${goalId}`) as { value: string };
+      expect(countRow.value).toBe("1");
+
+      // Goal has NOT been blocked on the first rejection.
+      const goalRow = db.prepare("SELECT status FROM goals WHERE id = ?").get(goalId) as { status: string };
+      expect(goalRow.status).toBe("active");
+    });
+
+    it("second consecutive budget rejection pauses the goal and cannot replan further", async () => {
+      const goalId = insertGoal(db);
+      insertTask(db, { goalId, title: "t1", description: "desc" });
+
+      // The single bounded cheaper-plan attempt already happened (counter = 1).
+      db.prepare("INSERT OR REPLACE INTO kv (key, value, updated_at) VALUES (?, ?, datetime('now'))")
+        .run(`orchestrator.budget_rejections.${goalId}`, "1");
+
+      // Another over-budget plan must NOT start a new planning -> review -> planning loop.
+      storePlan(db, goalId, { estimatedTotalCostCents: 9000 });
+      setOrchestratorState(db, { phase: "plan_review", goalId, replanCount: 0, failedTaskId: null, failedError: null });
+
+      const orc = makeOrchestrator(db);
+      const tick1 = await orc.tick();
+      expect(tick1.phase).toBe("idle");
+
+      const goalRow = db.prepare("SELECT status FROM goals WHERE id = ?").get(goalId) as { status: string };
+      expect(goalRow.status).toBe("paused");
+
+      const taskRow = db.prepare("SELECT status FROM task_graph WHERE goal_id = ? AND title = 't1'").get(goalId) as { status: string };
+      expect(taskRow.status).toBe("blocked");
+
+      const escalation = db.prepare("SELECT value FROM kv WHERE key = ?").get(`orchestrator.budget_escalation.${goalId}`) as { value: string };
+      const escalationData = JSON.parse(escalation.value);
+      expect(escalationData.code).toBe("PLAN_COST_MISMATCH"); // matches the 9000/100 plan fixture used here
+      expect(escalationData.action).toBe("goal_paused_tasks_blocked");
+
+      // A later tick stays idle: paused goals are not re-picked, no loop.
+      const tick2 = await orc.tick();
+      expect(tick2.phase).toBe("idle");
+    });
+
+    it("a cheaper replanned plan within the ceiling is approved and executes", async () => {
+      const goalId = insertGoal(db);
+      insertTask(db, { goalId, title: "t1", description: "desc" });
+
+      storePlan(db, goalId, { estimatedTotalCostCents: 9000 });
+      setOrchestratorState(db, { phase: "plan_review", goalId, replanCount: 0, failedTaskId: null, failedError: null });
+
+      const orc = makeOrchestrator(db);
+      await orc.tick(); // rejection #1 -> planning
+
+      // The "cheaper plan" attempt produced a plan under the ceiling.
+      storePlan(db, goalId, { estimatedTotalCostCents: 800 });
+      await orc.tick(); // planning -> plan_review
+
+      const result = await orc.tick(); // plan_review -> executing
       expect(result.phase).toBe("executing");
+
+      const goalRow = db.prepare("SELECT status FROM goals WHERE id = ?").get(goalId) as { status: string };
+      expect(goalRow.status).toBe("active");
+    });
+
+    it("a valid under-budget plan resets the rejection counter so past rejections cannot poison future work", async () => {
+      const goalId = insertGoal(db);
+      insertTask(db, { goalId, title: "t1", description: "desc" });
+
+      // One prior rejection already recorded for this goal.
+      db.prepare("INSERT OR REPLACE INTO kv (key, value, updated_at) VALUES (?, ?, datetime('now'))")
+        .run(`orchestrator.budget_rejections.${goalId}`, "1");
+
+      storePlan(db, goalId, { estimatedTotalCostCents: 100 });
+      setOrchestratorState(db, { phase: "plan_review", goalId, replanCount: 0, failedTaskId: null, failedError: null });
+
+      const orc = makeOrchestrator(db);
+      const result = await orc.tick();
+      expect(result.phase).toBe("executing");
+
+      // Counter must be cleared on approval: a later over-budget plan on this
+      // goal gets a full bounded retry instead of being blocked immediately.
+      const countRow = db.prepare("SELECT value FROM kv WHERE key = ?").get(`orchestrator.budget_rejections.${goalId}`);
+      expect(countRow).toBeUndefined();
+
+      // And a fresh over-budget plan on the same goal again gets the bounded
+      // cheaper-plan attempt (planning), not an immediate pause.
+      storePlan(db, goalId, { estimatedTotalCostCents: 9000 });
+      setOrchestratorState(db, { phase: "plan_review", goalId, replanCount: 0, failedTaskId: null, failedError: null });
+      const next = await orc.tick();
+      expect(next.phase).toBe("planning");
     });
   });
 });

@@ -467,8 +467,14 @@ describe("integration/plan-execute-flow", () => {
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(ulid(), goalId, "Task 1", "Do the thing", "pending", "generalist", 1, "[]", new Date().toISOString());
 
-      // Store a plan with cost below auto-approve threshold (5000 cents)
-      const highCostPlan = { ...plannerOutput, estimatedTotalCostCents: 4999 };
+      // Highest cost still below the auto-approve threshold (5000 cents).
+      // Declared total and task-level costs must agree (deterministic
+      // cost validation rejects mismatched plans).
+      const highCostPlan = {
+        ...plannerOutput,
+        estimatedTotalCostCents: 4999,
+        tasks: [{ ...plannerOutput.tasks[0], estimatedCostCents: 4999 }],
+      };
       db.prepare(
         "INSERT OR REPLACE INTO kv (key, value, updated_at) VALUES (?, ?, datetime('now'))",
       ).run(`orchestrator.plan.${goalId}`, JSON.stringify(highCostPlan));
@@ -478,7 +484,7 @@ describe("integration/plan-execute-flow", () => {
       const orc = makeOrchestrator(db, mocks);
       const result = await orc.tick();
 
-      // auto mode approves when cost is below autoBudgetThreshold (5000)
+      // auto mode approves when computed cost is below autoBudgetThreshold (5000)
       expect(result.phase).toBe("executing");
     });
   });
