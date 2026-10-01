@@ -30,6 +30,7 @@ vi.mock("../agent/injection-defense.js", () => ({
 // Import after mocks are set up
 const { isAllowedUri, isInternalNetwork, validateAgentCard } = await import("../registry/discovery.js");
 const { loadInstalledTools } = await import("../agent/tools.js");
+const { registerCapability } = await import("../self-mod/tools-manager.js");
 
 function makeTmpDbPath(): string {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "automaton-data-layer-test-"));
@@ -308,20 +309,53 @@ describe("Installed Tools Loading", () => {
     try { db.close(); } catch { /* already closed */ }
   });
 
-  it("loads enabled installed tools from DB", () => {
+  it("loads a registered capability from DB", () => {
+    // M1-B8: a capability only becomes a model-visible tool through the
+    // owner-side registry, which validates the CommandSpec and writes
+    // provenance. The declared riskLevel is surfaced verbatim — never the
+    // hardcoded "caution" of the pre-B8 loader.
+    const outcome = registerCapability(
+      db,
+      {
+        name: "test_tool",
+        kind: "command",
+        command: "/usr/local/bin/node",
+        args: [],
+        parameters: { type: "object", properties: {} },
+        permissions: { net: "none", fs: "none", env: "none" },
+        riskLevel: "safe",
+      },
+      {
+        sourceUrl: "https://example.invalid/tool",
+        commitOrVersion: "v1.0.0",
+        installedBy: "owner",
+        installedAt: new Date().toISOString(),
+      },
+    );
+    expect(outcome.ok).toBe(true);
+
+    const tools = loadInstalledTools(db);
+    expect(tools.length).toBe(1);
+    expect(tools[0].name).toBe("test_tool");
+    expect(tools[0].riskLevel).toBe("safe");
+  });
+
+  it("refuses to load an enabled row that carries no capability record", () => {
+    // M1-B8 fail-closed load: a row inserted by any path that skips the
+    // registry (a helper, an old DB, a raw db.installTool call) must never
+    // become a live tool.
     db.installTool({
-      id: "tool-1",
-      name: "test_tool",
+      id: "tool-raw",
+      name: "raw_tool",
       type: "custom",
       config: { command: "echo hello" },
       installedAt: new Date().toISOString(),
       enabled: true,
     });
 
+    expect(db.getInstalledTools().length).toBe(1);
     const tools = loadInstalledTools(db);
-    expect(tools.length).toBe(1);
-    expect(tools[0].name).toBe("test_tool");
-    expect(tools[0].riskLevel).toBe("caution");
+    expect(tools.length).toBe(0);
   });
 
   it("does not load disabled tools", () => {

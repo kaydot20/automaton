@@ -64,6 +64,13 @@ const EXTERNAL_BLOCKED_TOOLS = [
   // creator-initiated turns may touch the pipeline surface.
   "propose_self_update",
   "rollback_last_promotion",
+  // M1-B8 capability registration: external/heartbeat input must never
+  // reach the capability-registration surface at all. Registration is
+  // owner-side governance tooling (preflight §10: "never model-grantable
+  // to itself") and the policy denial must land BEFORE any side effect —
+  // before npm, before an installed_tools row, before conway.exec.
+  "install_mcp_server",
+  "install_npm_package",
 ] as const;
 
 /**

@@ -653,16 +653,36 @@ describe("package install inline validation", () => {
     });
   }
 
-  it("install_npm_package allows clean package names", async () => {
-    const tool = tools.find((t) => t.name === "install_npm_package")!;
-    await tool.execute({ package: "axios" }, ctx);
-    expect(conway.execCalls.length).toBe(1);
-    expect(conway.execCalls[0].command).toBe("npm install -g axios");
-  });
+  // M1-B8 (preflight §10 / §A scorecard): the install execution paths are
+  // DISABLED. There is no longer a "clean package name" that reaches npm —
+  // package installation is owner-side governance tooling with exact-version
+  // pinning, --ignore-scripts and a capability grant. These tests assert the
+  // stronger post-B8 invariant: no model-invocable argument, benign or
+  // hostile, produces an exec call or an installed_tools row.
+  const BENIGN_PACKAGES = [
+    "axios",
+    "@conway/automaton",
+    "axios@1.7.2",
+    "lodash",
+  ];
 
-  it("install_npm_package allows scoped packages", async () => {
-    const tool = tools.find((t) => t.name === "install_npm_package")!;
-    await tool.execute({ package: "@conway/automaton" }, ctx);
-    expect(conway.execCalls.length).toBe(1);
-  });
+  for (const pkg of BENIGN_PACKAGES) {
+    it(`install_npm_package is owner-only even for a clean package: ${pkg}`, async () => {
+      const tool = tools.find((t) => t.name === "install_npm_package")!;
+      const result = await tool.execute({ package: pkg }, ctx);
+      expect(result).toContain("Blocked");
+      expect(result).toContain("owner-only");
+      expect(conway.execCalls.length).toBe(0);
+      expect(db.getInstalledTools().length).toBe(0);
+    });
+
+    it(`install_mcp_server is owner-only even for a clean package: ${pkg}`, async () => {
+      const tool = tools.find((t) => t.name === "install_mcp_server")!;
+      const result = await tool.execute({ package: pkg, name: "ok_tool" }, ctx);
+      expect(result).toContain("Blocked");
+      expect(result).toContain("owner-only");
+      expect(conway.execCalls.length).toBe(0);
+      expect(db.getInstalledTools().length).toBe(0);
+    });
+  }
 });

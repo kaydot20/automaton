@@ -23,6 +23,11 @@ import { DEFAULT_TREASURY_POLICY } from "../types.js";
 import type { PolicyEngine } from "./policy-engine.js";
 import { sanitizeToolResult, sanitizeInput } from "./injection-defense.js";
 import { checkReserve } from "../conway/reserve.js";
+import { isKernelDegraded } from "../governance/kernel.js";
+import {
+  validateInvocationArgs,
+  verifyCapabilityRecord,
+} from "../self-mod/tools-manager.js";
 import { createLogger } from "../observability/logger.js";
 
 const logger = createLogger("tools");
@@ -578,27 +583,11 @@ export function createBuiltinTools(sandboxId: string): AutomatonTool[] {
         },
         required: ["package"],
       },
-      execute: async (args, ctx) => {
-        const pkg = args.package as string;
-        // Defense-in-depth: validate package name inline in case the
-        // policy engine's validate.package_name rule is bypassed.
-        if (!/^[@a-zA-Z0-9._\/-]+$/.test(pkg)) {
-          return `Blocked: invalid package name "${pkg}"`;
-        }
-        const result = await ctx.conway.exec(`npm install -g ${pkg}`, 60000);
-
-        const { ulid } = await import("ulid");
-        ctx.db.insertModification({
-          id: ulid(),
-          timestamp: new Date().toISOString(),
-          type: "tool_install",
-          description: `Installed npm package: ${pkg}`,
-          reversible: true,
-        });
-
-        return result.exitCode === 0
-          ? `Installed: ${pkg}`
-          : `Failed to install ${pkg}: ${result.stderr}`;
+      execute: async (_args, _ctx) => {
+        // M1-B8 (preflight §10, F5.2): same owner-only gate as
+        // install_mcp_server. Package installation is owner-side tooling
+        // with exact-version pinning and --ignore-scripts.
+        return "Blocked: package installation is owner-only. npm installs require an owner-issued capability grant with exact-version pinning (preflight §10). You cannot install packages.";
       },
     },
     // ── Self-Mod: Upstream Awareness ──
@@ -1074,39 +1063,12 @@ Model: ${ctx.inference.getDefaultModel()}
         required: ["name", "package"],
       },
       execute: async (args, ctx) => {
-        const pkg = args.package as string;
-        // Defense-in-depth: validate package name inline in case the
-        // policy engine's validate.package_name rule is bypassed.
-        if (!/^[@a-zA-Z0-9._\/-]+$/.test(pkg)) {
-          return `Blocked: invalid package name "${pkg}"`;
-        }
-        const result = await ctx.conway.exec(`npm install -g ${pkg}`, 60000);
-
-        if (result.exitCode !== 0) {
-          return `Failed to install MCP server: ${result.stderr}`;
-        }
-
-        const { ulid } = await import("ulid");
-        const toolEntry = {
-          id: ulid(),
-          name: args.name as string,
-          type: "mcp" as const,
-          config: args.config ? JSON.parse(args.config as string) : {},
-          installedAt: new Date().toISOString(),
-          enabled: true,
-        };
-
-        ctx.db.installTool(toolEntry);
-
-        ctx.db.insertModification({
-          id: ulid(),
-          timestamp: new Date().toISOString(),
-          type: "mcp_install",
-          description: `Installed MCP server: ${args.name} (${pkg})`,
-          reversible: true,
-        });
-
-        return `MCP server installed: ${args.name}`;
+        // M1-B8 (preflight §10, F5.1): capability registration for an
+        // executable definition is never model-grantable. The model-facing
+        // tool stays registered (visible, classified, policy-gated) but
+        // performs no install and writes no row — a single injected
+        // instruction can no longer author a reboot-surviving capability.
+        return "Blocked: capability registration is owner-only. Executable capabilities are registered by owner-side governance tooling with a validated CommandSpec and provenance (preflight §10: never model-grantable to itself). You cannot install MCP servers.";
       },
     },
 
@@ -3371,17 +3333,43 @@ export function loadInstalledTools(db: {
   }[];
 }): AutomatonTool[] {
   try {
+    // M1-B8 (preflight §10 boot check): while the protected kernel is
+    // unverified, no dynamically registered capability is exposed to the
+    // model — capability elevation is exactly what an unverified kernel
+    // must not grant.
+    if (isKernelDegraded()) {
+      logger.error(
+        "Registered capabilities withheld: protected-kernel integrity is degraded",
+      );
+      return [];
+    }
+
     const installed = db.getInstalledTools();
-    return installed.map((tool) => ({
-      name: tool.name,
-      description: `Installed tool: ${tool.name}`,
-      category: (tool.type === "mcp" ? "conway" : "vm") as ToolCategory,
-      riskLevel: "caution" as RiskLevel,
-      parameters: (tool.config?.parameters as Record<string, unknown>) || {
-        type: "object",
-        properties: {},
-      },
-      execute: createInstalledToolExecutor(tool),
+    const verified: { name: string; spec: import("../self-mod/tools-manager.js").CapabilitySpec }[] = [];
+
+    for (const tool of installed) {
+      // Fail closed: a row that predates the registry, lost its
+      // provenance, was tampered with offline, or is expired never
+      // becomes a model-visible tool.
+      const outcome = verifyCapabilityRecord(tool);
+      if (!outcome.ok) {
+        logger.error(
+          `Refusing to load capability "${tool.name}": ${outcome.reason}`,
+        );
+        continue;
+      }
+      verified.push({ name: tool.name, spec: outcome.record.spec });
+    }
+
+    return verified.map(({ name, spec }) => ({
+      name,
+      description: `Registered capability: ${name} (${spec.kind}, permissions net=${spec.permissions.net} fs=${spec.permissions.fs} env=${spec.permissions.env})`,
+      // Capability elevation is self-mod class: the declared grants are
+      // already in the description above, never model-overridable.
+      category: "self_mod" as ToolCategory,
+      riskLevel: spec.riskLevel as RiskLevel,
+      parameters: spec.parameters as Record<string, unknown>,
+      execute: createInstalledToolExecutor(name, spec),
     }));
   } catch (error) {
     logger.error(
@@ -3392,26 +3380,32 @@ export function loadInstalledTools(db: {
   }
 }
 
-function createInstalledToolExecutor(tool: {
-  name: string;
-  type: string;
-  config?: Record<string, unknown>;
-}): AutomatonTool["execute"] {
+function createInstalledToolExecutor(
+  name: string,
+  spec: import("../self-mod/tools-manager.js").CapabilitySpec,
+): AutomatonTool["execute"] {
   return async (args, ctx) => {
-    if (tool.type === "mcp") {
-      // MCP tools would be executed via MCP protocol
-      return `MCP tool ${tool.name} invoked with args: ${JSON.stringify(args)}`;
+    if (spec.kind === "mcp") {
+      // MCP tools would be executed via MCP protocol — still a stub
+      // (preflight §B row 8: "keep MCP stub").
+      return `MCP tool ${name} invoked with args: ${JSON.stringify(args)}`;
     }
-    // Generic installed tool — execute via sandbox shell if command is configured
-    const command = tool.config?.command as string | undefined;
+    // Generic capability — the command is the registered absolute path
+    // and the argv is the DECLARED arg list; model input is only accepted
+    // when it satisfies the registered schema.
+    const checked = validateInvocationArgs(spec.parameters, args);
+    if (!checked.ok) {
+      return `Blocked: ${checked.reason} (capability "${name}" registered schema)`;
+    }
+    const command = spec.command;
     if (command) {
       const result = await ctx.conway.exec(
-        `${command} ${escapeShellArg(JSON.stringify(args))}`,
+        [command, ...spec.args, escapeShellArg(JSON.stringify(args))].join(" "),
         30000,
       );
       return `exit_code: ${result.exitCode}\nstdout: ${result.stdout}\nstderr: ${result.stderr}`;
     }
-    return `Installed tool ${tool.name} has no executable command configured.`;
+    return `Capability "${name}" has no executable command configured.`;
   };
 }
 

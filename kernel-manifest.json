@@ -4,7 +4,7 @@
     "constitution.md": "d69f71832ab7c8ba6a827fd2fe988db5f76ff253d727906a95c064fe53408d8e",
     "src/agent/injection-defense.ts": "db2d44d7a4a3218ace1a9987530456301421206cf11afc7a264ef4afd0b501c2",
     "src/agent/policy-engine.ts": "e98768e407f3caaed2159088068b8dec57b40e4998cc4e185d00a79cd8749f69",
-    "src/agent/policy-rules/authority.ts": "e43a4e5e51a1a15cb46188d2532cdd3403918ee18f364455964ecc0757ebb820",
+    "src/agent/policy-rules/authority.ts": "b25daa24f9af911bb95ecb6f71d11d605187f6ad3646e23e8f655c0ba897b71a",
     "src/agent/policy-rules/command-safety.ts": "4d5e21de517b70df7262bfbc23f5de28408c3b123fa38904a72bd530ec9cafab",
     "src/agent/policy-rules/financial.ts": "5d4ac96a73ce41139afead70950e982e3c42ea85d8016b8c08652e35cc9e7b12",
     "src/agent/policy-rules/index.ts": "62d1b3ae34db8201b8726f35d7924e35f3307b3a2c38c75cd3b4e4393c1b3572",
@@ -22,7 +22,7 @@
     "src/inference/provider-registry.ts": "95be5155a22611928f041983753d68eaee6e7bb37324af2e9dc0a75eb57147a3",
     "src/net/policy.ts": "ea422e21de2790fe5f0342800f493219f822e7d170d6967d942cd3a6d40da92c",
     "src/self-mod/code.ts": "3c5e5e38a3c30ec3cc8d0afe799d23c64690f74000cd4df309b1dc3df94acb2f",
-    "src/self-mod/tools-manager.ts": "8f605da0542f72bc2abe0bae3c487fdfa6f70f3a8c037e4a1c68715c31fb4d5f",
+    "src/self-mod/tools-manager.ts": "ae58babea35b16cafbc8395f3a6f8bf93389a618d719c79c183eec8b07387739",
     "src/self-mod/upstream.ts": "887a1418e733673ff3e1b903141e836da3d190e2d9083efffd653605805c78b5"
   }
 }
