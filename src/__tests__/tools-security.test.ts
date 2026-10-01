@@ -53,6 +53,7 @@ describe("Tool Risk Level Classification", () => {
     check_child_status: "safe",
     verify_child_constitution: "safe",
     list_models: "safe",
+    get_promotion_status: "safe",
 
     // Caution tools (side effects but generally safe)
     exec: "caution",
@@ -74,6 +75,7 @@ describe("Tool Risk Level Classification", () => {
     start_child: "caution",
     message_child: "caution",
     prune_dead_children: "caution",
+    rollback_last_promotion: "caution",
 
     // Dangerous tools (significant side effects)
     delete_sandbox: "dangerous",
@@ -91,6 +93,7 @@ describe("Tool Risk Level Classification", () => {
     spawn_child: "dangerous",
     fund_child: "dangerous",
     distress_signal: "dangerous",
+    propose_self_update: "dangerous",
   };
 
   it("classifies all expected safe tools correctly", () => {

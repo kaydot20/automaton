@@ -447,6 +447,31 @@ export function recordApproval(
   return { ok: true };
 }
 
+export interface RollbackOutcome {
+  ok: boolean;
+  /** Phase that was discarded, or null when there was nothing to roll back. */
+  rolledBack: PromotionPhase | null;
+  reason?: string;
+}
+
+/**
+ * Model-facing rollback (preflight §6:165 `rollback_last_promotion`):
+ * withdraw the current promotion machine — cancel a pending proposal or
+ * approval, abandon a failed attempt, or clear the machine after a
+ * completed promotion. Pure kv-state transition: never touches source
+ * files or the kernel manifest. A fresh machine (phase none) is a no-op.
+ * A later proposal always needs a fresh owner-issued approval token, so a
+ * reset cannot authorize any new execution by itself.
+ */
+export function rollbackPromotion(store: KvStore): RollbackOutcome {
+  const state = loadPromotionState(store);
+  if (state.phase === "none") {
+    return { ok: true, rolledBack: null, reason: "No promotion to roll back." };
+  }
+  savePromotionState(store, emptyState());
+  return { ok: true, rolledBack: state.phase };
+}
+
 // ─── §B-row-7 stage execution ────────────────────────────────────────
 
 /** Scope of the §B-row-7 stages: exactly these four, in this order. */

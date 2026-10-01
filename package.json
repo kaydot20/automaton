@@ -51,7 +51,7 @@
     "test:financial": "vitest run --grep 'financial|spend|treasury'",
     "test:ci": "vitest run --reporter=verbose",
     "test:ci:bail": "vitest run --mode=ci",
-    "test:security:ci": "vitest run src/__tests__/financial.test.ts src/__tests__/policy-engine.test.ts src/__tests__/tools-security.test.ts src/__tests__/injection-defense.test.ts src/__tests__/command-injection.test.ts src/__tests__/path-protection.test.ts src/__tests__/spend-tracker.test.ts src/__tests__/reserve.test.ts src/__tests__/reserve-x402.test.ts src/__tests__/tools-sanitize-default.test.ts src/__tests__/orchestration/task-result-hardening.test.ts src/__tests__/net-policy.test.ts src/__tests__/x402-ssrf-dns.test.ts src/__tests__/governance/kernel.test.ts src/__tests__/governance/promotion.test.ts packages/cli/src/__tests__/relay-policy.test.ts",
+    "test:security:ci": "vitest run src/__tests__/financial.test.ts src/__tests__/policy-engine.test.ts src/__tests__/tools-security.test.ts src/__tests__/injection-defense.test.ts src/__tests__/command-injection.test.ts src/__tests__/path-protection.test.ts src/__tests__/spend-tracker.test.ts src/__tests__/reserve.test.ts src/__tests__/reserve-x402.test.ts src/__tests__/tools-sanitize-default.test.ts src/__tests__/orchestration/task-result-hardening.test.ts src/__tests__/net-policy.test.ts src/__tests__/x402-ssrf-dns.test.ts src/__tests__/governance/kernel.test.ts src/__tests__/governance/promotion.test.ts src/__tests__/governance/promotion-tools.test.ts packages/cli/src/__tests__/relay-policy.test.ts",
     "check:source-hygiene": "node scripts/check-source-hygiene.mjs",
     "check:kernel-manifest": "node scripts/check-kernel-manifest.mjs",
     "check:audit": "node scripts/audit-gate.mjs",

@@ -37,6 +37,11 @@ const SELF_MOD_TOOLS = [
   "pull_upstream",
   "reset_to_upstream",
   "revert_last_edit",
+  // M1-B7 promotion pipeline: while the kernel is unverified the model
+  // must not advance self-mod machinery at all. get_promotion_status is
+  // deliberately NOT listed — it is read-only observability.
+  "propose_self_update",
+  "rollback_last_promotion",
 ] as const;
 
 export const KERNEL_DEGRADED_TOOLS: readonly string[] = Object.freeze([

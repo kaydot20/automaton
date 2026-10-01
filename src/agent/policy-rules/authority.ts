@@ -59,6 +59,11 @@ const EXTERNAL_BLOCKED_TOOLS = [
   "spawn_child",
   "fund_child",
   "update_genesis_prompt",
+  // M1-B7 promotion pipeline: external/heartbeat input must never queue a
+  // self-update proposal or reset the promotion machine. Only agent- or
+  // creator-initiated turns may touch the pipeline surface.
+  "propose_self_update",
+  "rollback_last_promotion",
 ] as const;
 
 /**

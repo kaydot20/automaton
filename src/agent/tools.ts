@@ -692,6 +692,105 @@ export function createBuiltinTools(sandboxId: string): AutomatonTool[] {
       },
     },
 
+    // ── Self-Mod: Promotion Pipeline (M1-B7, preflight §6:165) ──
+    // The model's ONLY sanctioned route to source modification: queue a
+    // proposal into the governance promotion pipeline
+    // (src/governance/promotion.ts). No direct source edit is possible
+    // from here; approval and execution require owner-side governance
+    // tooling (PROMOTION_ADMIN_TOOLS is deliberately NOT registered —
+    // the model can never approve or execute its own update).
+    {
+      name: "propose_self_update",
+      description:
+        "Queue a self-update proposal into the governance promotion pipeline. The proposal (target files + optional unified diff patch) is validated — protected kernel files are rejected outright — then stored for owner review. You cannot approve or execute it yourself; the owner does that with governance tooling. Check progress with get_promotion_status.",
+      category: "self_mod",
+      riskLevel: "dangerous",
+      parameters: {
+        type: "object",
+        properties: {
+          title: {
+            type: "string",
+            description: "Short title of the proposed change",
+          },
+          description: {
+            type: "string",
+            description: "Why this change is needed",
+          },
+          files: {
+            type: "array",
+            items: { type: "string" },
+            description: "Repo-relative paths the proposal targets",
+          },
+          patch: {
+            type: "string",
+            description:
+              "Optional unified diff applied inside the isolated promotion worktree",
+          },
+        },
+        required: ["title", "description", "files"],
+      },
+      execute: async (args, ctx) => {
+        const { proposeSelfUpdate } = await import(
+          "../governance/promotion.js"
+        );
+        const files = args.files;
+        if (
+          !Array.isArray(files) ||
+          files.length === 0 ||
+          files.some((f) => typeof f !== "string")
+        ) {
+          return "BLOCKED: files must be a non-empty array of repo-relative path strings.";
+        }
+        const outcome = proposeSelfUpdate(ctx.db, {
+          title: typeof args.title === "string" ? args.title : "",
+          description:
+            typeof args.description === "string" ? args.description : "",
+          files: files as string[],
+          patch: typeof args.patch === "string" ? args.patch : null,
+        });
+        if (!outcome.ok) {
+          return `BLOCKED: ${outcome.reason ?? "proposal rejected"}`;
+        }
+        return "Proposal queued for owner review. Check progress with get_promotion_status. Only the owner can approve or execute it.";
+      },
+    },
+    {
+      name: "get_promotion_status",
+      description:
+        "Show the current state of the self-update promotion pipeline: phase, pending proposal, approval freshness, attempt budget, and last pipeline stage results.",
+      category: "self_mod",
+      riskLevel: "safe",
+      parameters: { type: "object", properties: {} },
+      execute: async (_args, ctx) => {
+        const { loadPromotionState } = await import(
+          "../governance/promotion.js"
+        );
+        const state = loadPromotionState(ctx.db);
+        // Omit the approval-token hash from the model-visible view: it is
+        // owner-side material and the model never needs it.
+        const { approvalTokenHash: _omit, ...publicState } = state;
+        return JSON.stringify(publicState, null, 2);
+      },
+    },
+    {
+      name: "rollback_last_promotion",
+      description:
+        "Withdraw or roll back the current promotion-pipeline state: cancels a pending proposal/approval, abandons a failed attempt, or clears the machine after a completed promotion. No-ops when there is nothing to roll back. Never touches source files.",
+      category: "self_mod",
+      riskLevel: "caution",
+      parameters: { type: "object", properties: {} },
+      execute: async (_args, ctx) => {
+        const { rollbackPromotion } = await import(
+          "../governance/promotion.js"
+        );
+        const outcome = rollbackPromotion(ctx.db);
+        if (outcome.rolledBack === null) {
+          return `Nothing to roll back: ${outcome.reason ?? "promotion machine is fresh"}`;
+        }
+        return `Rolled back promotion state (discarded phase: ${outcome.rolledBack}). Source files were not touched.`;
+      },
+    },
+
     {
       name: "modify_heartbeat",
       description: "Add, update, or remove a heartbeat entry.",
