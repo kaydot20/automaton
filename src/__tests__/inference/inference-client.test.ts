@@ -158,18 +158,32 @@ describe("UnifiedInferenceClient", () => {
     queueCompletion({ content: "after-retry" });
 
     vi.useFakeTimers();
-    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    // Capture backoff delays via a plain delegating wrapper. Do NOT use
+    // vi.spyOn(globalThis, "setTimeout") here: a spy created while fake
+    // timers are active corrupts the worker's timer state beyond any
+    // documented restore path (useRealTimers, mockRestore, afterAll
+    // re-sync, unstubGlobals all fail), leaking frozen timers into every
+    // later suite in the shared fork worker — which is what timed out
+    // the CI scheduler suite for 15 minutes.
+    const fakeSetTimeout = globalThis.setTimeout;
+    const waits: number[] = [];
+    globalThis.setTimeout = ((fn: (...args: any[]) => void, ms?: number, ...rest: any[]) => {
+      waits.push(Number(ms));
+      return (fakeSetTimeout as any)(fn, ms, ...rest);
+    }) as typeof globalThis.setTimeout;
 
-    const pending = client.chat({ tier: "fast", messages: BASE_MESSAGES });
-    await vi.runAllTimersAsync();
-    const result = await pending;
+    try {
+      const pending = client.chat({ tier: "fast", messages: BASE_MESSAGES });
+      await vi.runAllTimersAsync();
+      const result = await pending;
 
-    expect(result.content).toBe("after-retry");
-    expect(result.metadata.retries).toBe(2);
-    const waits = setTimeoutSpy.mock.calls.map((call) => Number(call[1]));
-    expect(waits).toEqual([1000, 2000]);
-
-    vi.useRealTimers();
+      expect(result.content).toBe("after-retry");
+      expect(result.metadata.retries).toBe(2);
+      expect(waits).toEqual([1000, 2000]);
+    } finally {
+      globalThis.setTimeout = fakeSetTimeout;
+      vi.useRealTimers();
+    }
   });
 
   it.each([429, 500, 503])(

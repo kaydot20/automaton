@@ -91,6 +91,11 @@ describe("DurableScheduler", () => {
   let conway: MockConwayClient;
 
   beforeEach(() => {
+    // Defensive timer hygiene: some sibling suites in the shared worker
+    // install fake timers; a leaked install freezes every setTimeout in
+    // later files (including the bounded-balance-fetch timeouts), so the
+    // overlap-prevention test then hits the 30 s vitest timeout.
+    vi.useRealTimers();
     db = createTestDb();
     rawDb = db.raw;
     conway = new MockConwayClient();
@@ -98,6 +103,19 @@ describe("DurableScheduler", () => {
 
   afterEach(() => {
     db.close();
+  });
+
+  describe("worker timer sanity", () => {
+    it("real setTimeout resolves (fake-timer leak guard)", async () => {
+      // A sibling suite that creates vi.spyOn(globalThis, "setTimeout")
+      // while fake timers are active poisons the shared fork worker so
+      // real timers never fire in later files — previously surfacing as a
+      // confusing 30 s timeout in the overlap-prevention test below. This
+      // guard fails fast with the actual cause if that pattern regresses.
+      const t0 = Date.now();
+      await new Promise<void>((resolve) => setTimeout(resolve, 50));
+      expect(Date.now() - t0).toBeLessThan(10_000);
+    });
   });
 
   describe("tick overlap prevention", () => {
