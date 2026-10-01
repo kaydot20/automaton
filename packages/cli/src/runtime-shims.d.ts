@@ -17,6 +17,31 @@ declare module "@conway/automaton/config.js" {
   export function resolvePath(p: string): string;
 }
 
+declare module "@conway/automaton/net/policy.js" {
+  export interface DnsResolver {
+    lookup(hostname: string): Promise<string[]>;
+  }
+
+  export interface OutboundPolicyOptions {
+    purpose: "payment" | "fetch" | "relay" | "discovery";
+    allowedDomains?: string[];
+    allowHttpOnLoopback?: boolean;
+    resolver?: DnsResolver;
+    requireDnsResolution?: boolean;
+  }
+
+  export type NetworkCheckResult =
+    | { allowed: true }
+    | { allowed: false; code: string; message: string };
+
+  export function assertOutboundAllowed(
+    url: string,
+    options: OutboundPolicyOptions,
+  ): Promise<NetworkCheckResult>;
+
+  export function isHostnameWellFormed(hostname: string): boolean;
+}
+
 declare module "@conway/automaton/state/database.js" {
   export interface CliToolCall {
     name: string;

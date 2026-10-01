@@ -18,10 +18,10 @@ async function main(): Promise<void> {
       await import("./commands/logs.js");
       break;
     case "fund":
-      await import("./commands/fund.js");
+      await import("./commands/fund.js").then((m) => m.fundCli());
       break;
     case "send":
-      await import("./commands/send.js");
+      await import("./commands/send.js").then((m) => m.sendCli());
       break;
     default:
       console.log(`

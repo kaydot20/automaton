@@ -30,10 +30,10 @@ const ALLOWLIST = new Map([
   ["src/conway/http-client.ts", "sanctioned network client (F4.3)"],
   // Loopback-scoped Ollama discovery (M1-A F4.2: classified low risk).
   ["src/ollama/discover.ts", "loopback-only Ollama discovery"],
-  // B4-guarded CLI commands: both validate the target URL through
-  // src/net/policy.ts before fetching.
-  ["packages/cli/src/commands/send.ts", "CLI relay send (policy-guarded)"],
-  ["packages/cli/src/commands/fund.ts", "CLI credit transfer (policy-guarded)"],
+  // B4.1: the ONLY raw fetch() in the CLI — the guarded relay transport.
+  // Every hop is validated through src/net/policy.ts (purpose "relay",
+  // mandatory DNS tier); send.ts/fund.ts are no longer allowlisted.
+  ["packages/cli/src/lib/relay-fetch.ts", "CLI guarded relay transport (policy-gated per hop)"],
   // Conway client local-exec fallback (audited path; no sandbox available).
   ["src/conway/client.ts", "Conway client exec fallback"],
 ]);
