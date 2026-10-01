@@ -16,7 +16,7 @@
     "src/conway/http-client.ts": "d17fef2f5f90a2fc3ab744b154ff0ddc135b2aec17080ddd544b2723d0aa1317",
     "src/conway/x402.ts": "ddd8fb85bfb12171685f4c6019bdb059457a077660c281e072a02bafd09c676b",
     "src/governance/kernel.ts": "1a0b9a6c65a6199d612fbe2a5caa084f6d49950267f5c3c6c4afe3973b44acef",
-    "src/governance/promotion.ts": "068ad76f6d6e41f4703f68562b58cfd6f12be320964a8eaf027ba13dcc344463",
+    "src/governance/promotion.ts": "e12c7ac46fc2088db16fa6eb67800d91e9737cc6317afb8701a3f99dcf063ed4",
     "src/identity/chain.ts": "d929c0657e26db7fd987f54bac010c0d67936084f904f540994da51d1bc0083c",
     "src/identity/wallet.ts": "d17d09c95263c7bf4e59a5460874e34eff30739f8e1cb5b61b73ef87916e4aa7",
     "src/inference/provider-registry.ts": "95be5155a22611928f041983753d68eaee6e7bb37324af2e9dc0a75eb57147a3",

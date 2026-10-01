@@ -24,7 +24,9 @@ import Database from "better-sqlite3";
 import {
   APPROVAL_VALIDITY_MS,
   MAX_PROMOTION_ATTEMPTS,
+  PROMOTION_STAGE_NAMES,
   PROMOTION_STATE_KEY,
+  findKernelFileTargets,
   hashApprovalToken,
   issueApprovalToken,
   loadPromotionState,
@@ -40,6 +42,9 @@ import { PolicyEngine } from "../../agent/policy-engine.js";
 import { createPathProtectionRules } from "../../agent/policy-rules/path-protection.js";
 import { createDefaultRules } from "../../agent/policy-rules/index.js";
 import { defaultManifestPath, verifyKernel } from "../../governance/kernel.js";
+
+// Every pipeline stage runs through the injectable runner — no test here
+// may touch the real repository with git/pnpm commands.
 import type { PolicyRequest } from "../../types.js";
 
 // ─── Helpers ─────────────────────────────────────────────────────────
@@ -100,7 +105,63 @@ const PROPOSAL = {
   title: "Test update",
   description: "A test self-update proposal",
   files: ["src/example/file.ts"],
+  patch: null as string | null,
 };
+
+/**
+ * Deterministic in-memory stage runner: records the commands the pipeline
+ * attempts and lets each test pre-script the outcome per stage. The
+ * `git worktree add` invocation materializes the kernel file set into the
+ * target directory so downstream stages see a plausible worktree.
+ */
+function makeRunner(outcomes: Record<string, boolean> = {}) {
+  const calls: Array<{ command: string; args: string[]; cwd: string }> = [];
+  const run = (command: string, args: string[], cwd: string) => {
+    calls.push({ command, args, cwd });
+    if (command === "git" && args[0] === "worktree") {
+      // git worktree add <path> HEAD — the target path is args[2].
+      const target = args[2];
+      const manifest = JSON.parse(
+        fs.readFileSync(defaultManifestPath(REPO_ROOT), "utf8"),
+      ) as { files: Record<string, string> };
+      for (const rel of Object.keys(manifest.files)) {
+        const dest = path.join(target, rel);
+        fs.mkdirSync(path.dirname(dest), { recursive: true });
+        fs.copyFileSync(path.join(REPO_ROOT, rel), dest);
+      }
+      fs.copyFileSync(defaultManifestPath(REPO_ROOT), path.join(target, "kernel-manifest.json"));
+      return { stdout: "" };
+    }
+    const key = args.join(" ");
+    const ok = outcomes[key] ?? outcomes["*"] ?? true;
+    if (!ok) {
+      throw new Error(`simulated failure: ${key}`);
+    }
+    return { stdout: `ran: ${key}` };
+  };
+  return { calls, run };
+}
+
+/**
+ * Runner for tests that must NEVER reach pipeline stages: any stage command
+ * is a test failure. Used for pure state-machine denial paths.
+ */
+const NO_STAGES_RUNNER = () => {
+  throw new Error("pipeline stages must not run in this test");
+};
+
+/** Fresh isolated repoRoot for promote calls (never the real repo). */
+function makeSafeRepoRoot(): string {
+  return fs.mkdtempSync(path.join(os.tmpdir(), "promotion-safe-"));
+}
+
+function rmSafeRepoRoot(repoRoot: string): void {
+  try {
+    fs.rmSync(repoRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+  } catch {
+    // temp cleanup only
+  }
+}
 
 beforeEach(() => {
   // The source-path rule resolves against process.cwd(); tests that exercise
@@ -115,6 +176,7 @@ afterEach(() => {
 describe("promotion — valid flow", () => {
   it("propose → approve → promote transitions cleanly", () => {
     const db = makeDb();
+    const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "promotion-flow-"));
     try {
       expect(proposeSelfUpdate(kv(db), PROPOSAL).ok).toBe(true);
       expect(loadPromotionState(kv(db)).phase).toBe("proposed");
@@ -123,11 +185,17 @@ describe("promotion — valid flow", () => {
       expect(recordApproval(kv(db), token).ok).toBe(true);
       expect(loadPromotionState(kv(db)).phase).toBe("approved");
 
-      const result = promoteApprovedUpdate(kv(db), { approvalToken: token });
+      const runner = makeRunner();
+      const result = promoteApprovedUpdate(kv(db), {
+        approvalToken: token,
+        repoRoot,
+        run: runner.run,
+      });
       expect(result.ok).toBe(true);
       expect(loadPromotionState(kv(db)).phase).toBe("promoted");
     } finally {
       db.close();
+      try { fs.rmSync(repoRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }); } catch { /* temp cleanup */ }
     }
   });
 
@@ -143,6 +211,83 @@ describe("promotion — valid flow", () => {
       expect(verification.checks.every((check) => check.passed)).toBe(true);
     } finally {
       db.close();
+    }
+  });
+
+  it("full pipeline green → promoted, with all four §B-row-7 stages executed", () => {
+    const db = makeDb();
+    const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "promotion-pipeline-"));
+    try {
+      proposeSelfUpdate(kv(db), PROPOSAL);
+      const { token } = issueApprovalToken();
+      recordApproval(kv(db), token);
+
+      const runner = makeRunner();
+      const result = promoteApprovedUpdate(kv(db), { approvalToken: token, repoRoot, run: runner.run });
+
+      expect(result.ok, JSON.stringify(result.pipeline)).toBe(true);
+      expect(loadPromotionState(kv(db)).phase).toBe("promoted");
+      expect(result.pipeline.map((stage) => stage.stage)).toEqual([
+        "worktree-prepare",
+        "worktree-apply",
+        "build",
+        "unit-tests",
+        "governance-regression",
+      ]);
+      expect(result.pipeline.every((stage) => stage.ok)).toBe(true);
+      // The injected runner served build + unit-tests + governance stages.
+      expect(runner.calls.length).toBeGreaterThanOrEqual(3);
+    } finally {
+      db.close();
+      try { fs.rmSync(repoRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }); } catch { /* temp cleanup */ }
+    }
+  });
+
+  it("build failure → not promoted, machine failed, later stages never run", () => {
+    const db = makeDb();
+    const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "promotion-buildfail-"));
+    try {
+      proposeSelfUpdate(kv(db), PROPOSAL);
+      const { token } = issueApprovalToken();
+      recordApproval(kv(db), token);
+
+      const runner = makeRunner({ "pnpm run typecheck": false });
+      const result = promoteApprovedUpdate(kv(db), { approvalToken: token, repoRoot, run: runner.run });
+
+      expect(result.ok, JSON.stringify(result.pipeline)).toBe(false);
+      expect(loadPromotionState(kv(db)).phase).toBe("failed");
+      expect(result.pipeline.map((stage) => stage.stage)).toEqual([
+        "worktree-prepare",
+        "worktree-apply",
+        "build",
+      ]);
+      expect(result.pipeline[2].ok).toBe(false);
+      expect(loadPromotionState(kv(db)).lastError).toMatch(/build failed/i);
+    } finally {
+      db.close();
+      try { fs.rmSync(repoRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }); } catch { /* temp cleanup */ }
+    }
+  });
+
+  it("governance-regression failure → not promoted", () => {
+    const db = makeDb();
+    const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "promotion-govfail-"));
+    try {
+      proposeSelfUpdate(kv(db), PROPOSAL);
+      const { token } = issueApprovalToken();
+      recordApproval(kv(db), token);
+
+      const runner = makeRunner({ "pnpm run test:ci:bail": false });
+      const result = promoteApprovedUpdate(kv(db), { approvalToken: token, repoRoot, run: runner.run });
+
+      expect(result.ok).toBe(false);
+      expect(loadPromotionState(kv(db)).phase).toBe("failed");
+      const stages = result.pipeline.map((stage) => stage.stage);
+      expect(stages).toContain("unit-tests");
+      expect(stages).not.toContain("governance-regression");
+    } finally {
+      db.close();
+      try { fs.rmSync(repoRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }); } catch { /* temp cleanup */ }
     }
   });
 
@@ -166,7 +311,7 @@ describe("promotion — denied flows", () => {
     const db = makeDb();
     try {
       proposeSelfUpdate(kv(db), PROPOSAL);
-      const result = promoteApprovedUpdate(kv(db), {});
+      const result = promoteApprovedUpdate(kv(db), { run: NO_STAGES_RUNNER });
       expect(result.ok).toBe(false);
       expect(result.reason).toMatch(/approval token/i);
       expect(loadPromotionState(kv(db)).phase).toBe("proposed"); // unchanged
@@ -183,7 +328,7 @@ describe("promotion — denied flows", () => {
       const { token: realToken } = issueApprovalToken();
       recordApproval(kv(db), realToken);
 
-      const wrong = promoteApprovedUpdate(kv(db), { approvalToken: "a".repeat(64) });
+      const wrong = promoteApprovedUpdate(kv(db), { approvalToken: "a".repeat(64), run: NO_STAGES_RUNNER });
       expect(wrong.ok).toBe(false);
       expect(loadPromotionState(kv(db)).phase).toBe("failed"); // real attempt consumed
     } finally {
@@ -199,7 +344,7 @@ describe("promotion — denied flows", () => {
       recordApproval(kv(db), token);
       ageApproval(db, APPROVAL_VALIDITY_MS + 5_000);
 
-      const result = promoteApprovedUpdate(kv(db), { approvalToken: token });
+      const result = promoteApprovedUpdate(kv(db), { approvalToken: token, run: NO_STAGES_RUNNER });
       expect(result.ok).toBe(false);
       expect(result.reason).toMatch(/validity|issued/i);
       expect(loadPromotionState(kv(db)).phase).toBe("failed");
@@ -212,7 +357,7 @@ describe("promotion — denied flows", () => {
     const db = makeDb();
     try {
       const { token } = issueApprovalToken();
-      const result = promoteApprovedUpdate(kv(db), { approvalToken: token });
+      const result = promoteApprovedUpdate(kv(db), { approvalToken: token, run: NO_STAGES_RUNNER });
       expect(result.ok).toBe(false);
       expect(result.reason).toMatch(/no proposal recorded/i);
       expect(loadPromotionState(kv(db)).phase).toBe("failed"); // real attempt recorded
@@ -278,7 +423,7 @@ describe("promotion — malformed persisted state fails closed", () => {
         lastError: null,
         updatedAt: new Date().toISOString(),
       });
-      const result = promoteApprovedUpdate(kv(db), { approvalToken: token });
+      const result = promoteApprovedUpdate(kv(db), { approvalToken: token, run: NO_STAGES_RUNNER });
       expect(result.ok).toBe(false);
       expect(result.reason).toMatch(/attempts used/i);
     } finally {
@@ -292,39 +437,46 @@ describe("promotion — malformed persisted state fails closed", () => {
 describe("promotion — replay and reuse", () => {
   it("a consumed token cannot promote a second proposal (single use)", () => {
     const db = makeDb();
+    const repoRoot = makeSafeRepoRoot();
     try {
       proposeSelfUpdate(kv(db), PROPOSAL);
       const { token } = issueApprovalToken();
       recordApproval(kv(db), token);
-      expect(promoteApprovedUpdate(kv(db), { approvalToken: token }).ok).toBe(true);
+      expect(
+        promoteApprovedUpdate(kv(db), { approvalToken: token, repoRoot, run: makeRunner().run }).ok,
+      ).toBe(true);
 
-      // New proposal reuses the OLD token: phase is promoted → verify fails.
+      // New proposal + creator re-issues the SAME token value: a legitimate
+      // fresh approval (new hash record, new timestamp), so promotion may
+      // succeed again — but it is a distinct authorization event, and the
+      // first promotion already consumed the approved phase.
       expect(proposeSelfUpdate(kv(db), { ...PROPOSAL, title: "Second" }).ok).toBe(true);
-      expect(recordApproval(kv(db), token).ok).toBe(true); // hashes match — this is a NEW approval record
-      // A genuinely replayed promotion needs the same token AND fresh
-      // timestamp: simulate replay by aging the new record with the old
-      // token's hash is impossible; instead prove the promote re-check
-      // binds token to CURRENT state (new hash, old token → deny).
-      const replay = promoteApprovedUpdate(kv(db), { approvalToken: token });
-      expect(replay.ok).toBe(true); // same token re-issued by creator is a legitimate new approval
+      expect(recordApproval(kv(db), token).ok).toBe(true);
+      const replay = promoteApprovedUpdate(kv(db), { approvalToken: token, repoRoot, run: makeRunner().run });
+      expect(replay.ok).toBe(true);
     } finally {
       db.close();
+      rmSafeRepoRoot(repoRoot);
     }
   });
 
   it("double-promote of the same approval is refused (phase no longer approved)", () => {
     const db = makeDb();
+    const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "promotion-double-"));
     try {
       proposeSelfUpdate(kv(db), PROPOSAL);
       const { token } = issueApprovalToken();
       recordApproval(kv(db), token);
-      expect(promoteApprovedUpdate(kv(db), { approvalToken: token }).ok).toBe(true);
+      expect(
+        promoteApprovedUpdate(kv(db), { approvalToken: token, repoRoot, run: makeRunner().run }).ok,
+      ).toBe(true);
 
-      const second = promoteApprovedUpdate(kv(db), { approvalToken: token });
+      const second = promoteApprovedUpdate(kv(db), { approvalToken: token, repoRoot, run: makeRunner().run });
       expect(second.ok).toBe(false);
       expect(second.reason).toMatch(/phase is "promoted"/);
     } finally {
       db.close();
+      try { fs.rmSync(repoRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }); } catch { /* temp cleanup */ }
     }
   });
 });
@@ -467,9 +619,18 @@ describe("promotion — persistence across restart", () => {
         );
       `);
       expect(loadPromotionState(kv(second)).phase).toBe("approved");
-      const result = promoteApprovedUpdate(kv(second), { approvalToken: token });
-      expect(result.ok).toBe(true);
-      expect(loadPromotionState(kv(second)).phase).toBe("promoted");
+      const safeRoot = makeSafeRepoRoot();
+      try {
+        const result = promoteApprovedUpdate(kv(second), {
+          approvalToken: token,
+          repoRoot: safeRoot,
+          run: makeRunner().run,
+        });
+        expect(result.ok).toBe(true);
+        expect(loadPromotionState(kv(second)).phase).toBe("promoted");
+      } finally {
+        rmSafeRepoRoot(safeRoot);
+      }
       second.close();
     } finally {
       // Windows can hold the SQLite WAL lock briefly after close; a cleanup
@@ -492,7 +653,7 @@ describe("promotion — no side effects after denial", () => {
       proposeSelfUpdate(kv(db), PROPOSAL);
       const before = db.prepare("SELECT value FROM kv WHERE key = ?").get(PROMOTION_STATE_KEY) as { value: string };
 
-      promoteApprovedUpdate(kv(db), {});
+      promoteApprovedUpdate(kv(db), { run: NO_STAGES_RUNNER });
 
       const after = db.prepare("SELECT value FROM kv WHERE key = ?").get(PROMOTION_STATE_KEY) as { value: string };
       expect(after.value).toBe(before.value);
@@ -516,7 +677,7 @@ describe("promotion — no side effects after denial", () => {
 
         // Force denial via expired approval.
         ageApproval(db, APPROVAL_VALIDITY_MS + 1_000);
-        promoteApprovedUpdate(kv(db), { approvalToken: token });
+        promoteApprovedUpdate(kv(db), { approvalToken: token, run: NO_STAGES_RUNNER });
 
         expect(fs.readFileSync(probe, "utf8")).toBe("untouched");
         expect(fs.statSync(probe).mtimeMs).toBe(before.mtimeMs);
@@ -529,40 +690,127 @@ describe("promotion — no side effects after denial", () => {
   });
 });
 
+// ─── 9b. Proposal-time protected-file rejection (§6 line 166) ────────
+
+describe("promotion — proposal-time kernel rejection", () => {
+  it("proposal touching a kernel file is rejected before any state change", () => {
+    const db = makeDb();
+    try {
+      const before = db.prepare("SELECT value FROM kv WHERE key = ?").get(PROMOTION_STATE_KEY) as { value?: string } | undefined;
+
+      const result = proposeSelfUpdate(kv(db), {
+        title: "Tamper with kernel",
+        description: "Should be rejected",
+        files: ["src/agent/policy-rules/financial.ts"],
+      });
+
+      expect(result.ok).toBe(false);
+      expect(result.reason).toMatch(/protected kernel files are never self-modifiable/i);
+      const after = db.prepare("SELECT value FROM kv WHERE key = ?").get(PROMOTION_STATE_KEY) as { value?: string } | undefined;
+      expect(after?.value ?? "").toBe(before?.value ?? ""); // state untouched
+    } finally {
+      db.close();
+    }
+  });
+
+  it("a kernel file smuggled inside the patch (diff header) is rejected", () => {
+    const db = makeDb();
+    try {
+      const result = proposeSelfUpdate(kv(db), {
+        title: "Smuggled kernel edit",
+        description: "Patch targets a kernel file via diff header",
+        files: ["src/example/benign.ts"],
+        patch: [
+          "diff --git a/src/agent/policy-engine.ts b/src/agent/policy-engine.ts",
+          "--- a/src/agent/policy-engine.ts",
+          "+++ b/src/agent/policy-engine.ts",
+          "@@ -1,1 +1,1 @@",
+          "-harmless",
+          "+malicious",
+        ].join("\n"),
+      });
+      expect(result.ok).toBe(false);
+      expect(result.reason).toMatch(/src\/agent\/policy-engine\.ts/);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("benign (non-kernel) proposals are accepted", () => {
+    const db = makeDb();
+    try {
+      const result = proposeSelfUpdate(kv(db), {
+        title: "Benign",
+        description: "No kernel targets",
+        files: ["src/example/benign.ts"],
+        patch: "diff --git a/src/example/benign.ts b/src/example/benign.ts\n--- a/src/example/benign.ts\n+++ b/src/example/benign.ts\n",
+      });
+      expect(result.ok).toBe(true);
+      expect(loadPromotionState(kv(db)).proposal?.files).toEqual(["src/example/benign.ts"]);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("findKernelFileTargets checks both file list and diff headers", () => {
+    expect(findKernelFileTargets({ files: ["constitution.md"] })).toEqual(["constitution.md"]);
+    expect(
+      findKernelFileTargets({
+        files: [],
+        patch: "diff --git a/src/net/policy.ts b/src/net/policy.ts\n",
+      }),
+    ).toEqual(["src/net/policy.ts"]);
+    expect(findKernelFileTargets({ files: ["src/example/benign.ts"], patch: null })).toEqual([]);
+  });
+
+  it("pipeline stages are exactly the §B-row-7 set", () => {
+    expect([...PROMOTION_STAGE_NAMES]).toEqual([
+      "worktree-prepare",
+      "build",
+      "unit-tests",
+      "governance-regression",
+    ]);
+  });
+});
+
 // ─── 10. Protected-kernel interaction ────────────────────────────────
 
 describe("promotion — protected-kernel interaction", () => {
-  it("promotion state changes do not affect kernel verification", () => {
+  it("promotion state changes do not affect kernel verification (repo tree)", () => {
     const db = makeDb();
+    const repoRoot = makeSafeRepoRoot();
     try {
       proposeSelfUpdate(kv(db), PROPOSAL);
       const { token } = issueApprovalToken();
       recordApproval(kv(db), token);
-      promoteApprovedUpdate(kv(db), { approvalToken: token });
+      promoteApprovedUpdate(kv(db), { approvalToken: token, repoRoot, run: makeRunner().run });
 
       const result = verifyKernel(REPO_ROOT, defaultManifestPath(REPO_ROOT));
       expect(result.verdict.status).toBe("ok");
       expect(result.mustRefuse).toBe(false);
     } finally {
       db.close();
+      rmSafeRepoRoot(repoRoot);
     }
   });
 
-  it("kernel-manifest.json is not a promotion target and regeneration stays offline", () => {
+  it("promotion never writes the repo manifest; worktree writes stay inside the worktree", () => {
     const source = fs.readFileSync(
       path.join(REPO_ROOT, "src", "governance", "promotion.ts"),
       "utf8",
     );
-    expect(source).not.toMatch(/generateManifest|writeFileSync\(.*kernel-manifest/);
-    expect(source).not.toMatch(/check-kernel-manifest/gi);
+    // No manifest regeneration function may be reachable from the pipeline.
+    expect(source).not.toMatch(/generateManifest\s*\(/);
+    // Manifest writes are the maintainer script's job, never the pipeline's.
+    expect(source).not.toMatch(/writeFileSync\([^\n]*kernel-manifest/);
   });
 
-  it("the promotion module never imports manifest-writing functions", () => {
+  it("the promotion module imports the kernel module read-only (verify/load only)", () => {
     const source = fs.readFileSync(
       path.join(REPO_ROOT, "src", "governance", "promotion.ts"),
       "utf8",
     );
-    expect(source).not.toMatch(/from "\.\/kernel\.js"/);
-    expect(source).not.toMatch(/from "\.\.\/governance\/kernel\.js"/);
+    expect(source).toContain('from "./kernel.js"');
+    expect(source).toMatch(/import \{ KERNEL_FILES, loadManifest, verifyKernel \} from "\.\/kernel\.js"/);
   });
 });
