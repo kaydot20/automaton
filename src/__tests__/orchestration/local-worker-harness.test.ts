@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -141,6 +141,7 @@ describe("orchestration/LocalWorkerPool harness integration", () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     db.close();
     fs.rmSync(tempHome, { recursive: true, force: true });
   });
@@ -292,23 +293,28 @@ describe("orchestration/LocalWorkerPool harness integration", () => {
       maxRetries: 0,
     });
 
-    const originalHome = process.env.HOME;
-    process.env.HOME = tempHome;
-    try {
-      const pool = new LocalWorkerPool({
-        db,
-        conway: new MockConwayClient(),
-        inference: workerInference as any,
-        harnessRegistry: registry,
-        identity: createTestIdentity(),
-        config: createTestConfig(),
-        allowedEditRoot: process.cwd(),
-      });
+    // Isolate the agent workspace under tempHome. AgentWorkspace resolves its
+    // default basePath via os.homedir() (see orchestration/workspace.ts), so
+    // stub homedir directly, matching the pattern in workspace.test.ts.
+    // A process.env.HOME swap does not work here: on Windows os.homedir()
+    // ignores HOME entirely, and suites that replace the process.env object
+    // (e.g. inference/provider-registry.test.ts) permanently decouple
+    // process.env from the real environment in a full-suite run, so a HOME
+    // swap would never reach os.homedir() and plan artifacts would silently
+    // persist under the real home instead of tempHome.
+    vi.spyOn(os, "homedir").mockReturnValue(tempHome);
 
-      await (pool as any).runWorker("worker-test", task, new AbortController().signal);
-    } finally {
-      process.env.HOME = originalHome;
-    }
+    const pool = new LocalWorkerPool({
+      db,
+      conway: new MockConwayClient(),
+      inference: workerInference as any,
+      harnessRegistry: registry,
+      identity: createTestIdentity(),
+      config: createTestConfig(),
+      allowedEditRoot: process.cwd(),
+    });
+
+    await (pool as any).runWorker("worker-test", task, new AbortController().signal);
 
     const row = getTaskById(db, task.id);
     expect(row?.status).toBe("completed");
