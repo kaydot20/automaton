@@ -62,6 +62,7 @@ export const KERNEL_FILES: readonly string[] = Object.freeze([
   "src/self-mod/code.ts",
   "src/self-mod/upstream.ts",
   "src/self-mod/tools-manager.ts",
+  "src/governance/promotion.ts",
 ]);
 
 const MANIFEST_ALGORITHM = "sha256" as const;

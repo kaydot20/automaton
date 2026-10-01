@@ -51,6 +51,7 @@ const KERNEL_FILES = [
   "src/self-mod/code.ts",
   "src/self-mod/upstream.ts",
   "src/self-mod/tools-manager.ts",
+  "src/governance/promotion.ts",
 ].sort();
 
 function normalize(content) {

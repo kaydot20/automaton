@@ -9,6 +9,7 @@
 import path from "path";
 import type { PolicyRule, PolicyRequest, PolicyRuleResult } from "../../types.js";
 import { isProtectedFile } from "../../self-mod/code.js";
+import { isSourcePath } from "../../governance/promotion.js";
 
 /** Sensitive files that must not be read by the agent */
 const SENSITIVE_READ_PATTERNS: string[] = [
@@ -166,10 +167,50 @@ function createTraversalDetectionRule(): PolicyRule {
   };
 }
 
+/**
+ * Deny every model-reachable mutation of local source paths (M1-B7, F6.1).
+ *
+ * The live tree is not writable by the agent: source changes move through
+ * the promotion pipeline (governance/promotion.ts), whose tools are the
+ * only sanctioned path. This rule closes the parallel mutation channels
+ * (exec/heredoc, write_file, edit_own_file) at the policy choke point,
+ * deterministic and outside model reasoning.
+ */
+function createSourcePathDenialRule(): PolicyRule {
+  return {
+    id: "path.source_tree",
+    description: "Deny model-reachable writes to source paths (promotion pipeline only)",
+    priority: 200,
+    appliesTo: {
+      by: "name",
+      names: ["edit_own_file", "write_file", "exec"],
+    },
+    evaluate(request: PolicyRequest): PolicyRuleResult | null {
+      const candidate =
+        typeof request.args.path === "string"
+          ? request.args.path
+          : typeof request.args.command === "string"
+            ? request.args.command
+            : "";
+      if (!candidate) return null;
+
+      if (isSourcePath(candidate)) {
+        return deny(
+          "path.source_tree",
+          "SOURCE_PATH_WRITE",
+          `Source paths are not writable by the agent — use propose_self_update (promotion pipeline). Target: ${candidate}`,
+        );
+      }
+      return null;
+    },
+  };
+}
+
 export function createPathProtectionRules(): PolicyRule[] {
   return [
     createProtectedFilesRule(),
     createReadSensitiveRule(),
     createTraversalDetectionRule(),
+    createSourcePathDenialRule(),
   ];
 }

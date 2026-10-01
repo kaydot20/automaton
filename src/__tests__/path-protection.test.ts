@@ -293,9 +293,12 @@ describe("path protection policy rules", () => {
 // ─── Rule Registration Tests ─────────────────────────────────────
 
 describe("path protection rule registration", () => {
-  it("exports three rules", () => {
+  // M1-B7 (preflight §6 / PR 7) adds path.source_tree: source paths are no
+  // longer model-writable — changes go through the promotion pipeline.
+  it("exports four rules", () => {
     const rules = createPathProtectionRules();
-    expect(rules).toHaveLength(3);
+    expect(rules).toHaveLength(4);
+    expect(rules.map((r) => r.id)).toContain("path.source_tree");
   });
 
   it("all rules have priority 200", () => {
