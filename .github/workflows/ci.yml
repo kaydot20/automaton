@@ -1,8 +1,20 @@
 name: CI
-on: [push, pull_request]
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  schedule:
+    # F7.2: scheduled audit — re-runs the dependency audit daily against a
+    # fresh advisory database. A newly published high/critical advisory
+    # affecting the lockfile turns this workflow red without any code change.
+    - cron: "0 3 * * *"
+
 jobs:
   build-and-test:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       matrix:
         node-version: [20, 22]
@@ -14,28 +26,49 @@ jobs:
       - uses: pnpm/action-setup@v4
       - run: pnpm install --frozen-lockfile
       - run: pnpm run typecheck
-      - name: Run tests
+
+      # M1-B5 (F7.1): FAIL-CLOSED. The previous step masked vitest timeouts
+      # with `timeout 300 pnpm test; [ $RC -eq 124 ] && exit 0` — a hang
+      # turned the job green. The vitest hang is now fixed properly
+      # (vitest.config.ts runs the `ci` mode with the forks/singleFork pool
+      # and bail-on-first-failure). There is no timeout bypass here: a run
+      # that exceeds the step timeout fails this job.
+      - name: Run tests (fail-closed)
+        run: pnpm run test:ci:bail
+        timeout-minutes: 15
+
+      # M1-B5 (F7.1/F7.3): the security suite is its own required gate with
+      # no masking — previously the same `exit 0` bypass applied, so a hung
+      # security suite produced green CI. Explicit file list (no accidental
+      # grep matches); every file is a hardening-acceptance suite.
+      - name: Run security tests (fail-closed, required)
+        run: pnpm run test:security:ci
         timeout-minutes: 10
-        run: |
-          set +e
-          timeout 300 pnpm test
-          RC=$?
-          set -e
-          # Exit code 124 means timeout killed the process (vitest hung after tests completed)
-          if [ $RC -eq 124 ]; then echo "::warning::vitest process hung after tests, killed by timeout"; exit 0; fi
-          exit $RC
-      - name: Run security tests
-        timeout-minutes: 10
-        run: |
-          set +e
-          timeout 180 pnpm test -- --grep "security|injection|policy|financial"
-          RC=$?
-          set -e
-          if [ $RC -eq 124 ]; then echo "::warning::vitest process hung after tests, killed by timeout"; exit 0; fi
-          exit $RC
+
+  source-hygiene:
+    # M1-B5 (F7.3): fail-closed check that raw fetch()/execSync() calls do
+    # not reappear outside the sanctioned network client and exec fallback
+    # (supports F4.3/F5: all outbound traffic must ride the outbound-network
+    # policy; shell-outs must use the audited Conway client path).
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Deny unsanctioned raw fetch()/execSync()
+        run: node scripts/check-source-hygiene.mjs
 
   security-audit:
+    # M1-B5 (F7.2): FAIL-CLOSED dependency audit. The previous step ended in
+    # `|| true`, so high/critical advisories could never fail CI. Enforcement
+    # lives in scripts/audit-gate.mjs: explicit, reviewed exceptions
+    # (dev/toolchain paths only); any NEW advisory above the threshold fails;
+    # unusable audit output fails.
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -43,4 +76,10 @@ jobs:
           node-version: 22
       - uses: pnpm/action-setup@v4
       - run: pnpm install --frozen-lockfile
-      - run: pnpm audit --audit-level=high || true
+      # M1-B5 (F7.2): FAIL-CLOSED dependency audit. `pnpm audit`'s own exit
+      # code is unusable for gating (it exits 0 whenever --ignore entries
+      # apply), so scripts/audit-gate.mjs parses `pnpm audit --json` and
+      # fails on any high/critical advisory outside the reviewed exception
+      # list — and fails closed if the audit output itself is unusable.
+      - name: Fail-closed dependency audit
+        run: pnpm run check:audit
