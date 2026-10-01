@@ -373,6 +373,40 @@ describe("DurableScheduler", () => {
       expect(ctx.db).toBe(rawDb);
     });
 
+    it("completes when the credit balance fetch hangs (CI regression)", async () => {
+      // Regression for the M1 CI failure: buildTickContext awaited the
+      // credit-balance fetch without a bound, so a stalled RPC froze the
+      // tick (and the scheduler suite timed out after 30 s). The fetch is
+      // now bounded; the context must complete with the degraded value.
+      conway.getCreditsBalance = () => new Promise(() => {}); // never resolves
+
+      const ctx = await buildTickContext(rawDb, conway, DEFAULT_HB_CONFIG);
+
+      expect(ctx.creditBalance).toBe(0);
+      expect(ctx.survivalTier).toBe("critical");
+    });
+
+    it("completes when the USDC balance fetch hangs (CI regression)", async () => {
+      // Same bound for the on-chain USDC read (real viem/Solana RPC).
+      vi.resetModules();
+      vi.doMock("../conway/x402.js", () => ({
+        getUsdcBalance: () => new Promise(() => {}), // never resolves
+      }));
+      const { buildTickContext: buildCtxMocked } = await import(
+        "../heartbeat/tick-context.js"
+      );
+
+      const ctx = await buildCtxMocked(
+        rawDb,
+        conway,
+        DEFAULT_HB_CONFIG,
+        createTestIdentity().address,
+        "evm",
+      );
+
+      expect(ctx.usdcBalance).toBe(0);
+    });
+
     it("handles API failure gracefully", async () => {
       // Make getCreditsBalance throw
       conway.getCreditsBalance = async () => {
