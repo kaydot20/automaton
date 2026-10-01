@@ -13,6 +13,7 @@ import { createPathProtectionRules } from "./path-protection.js";
 import { createFinancialRules } from "./financial.js";
 import { createAuthorityRules } from "./authority.js";
 import { createRateLimitRules } from "./rate-limits.js";
+import { createKernelIntegrityRule } from "./kernel.js";
 
 /**
  * Create the default set of policy rules.
@@ -28,5 +29,9 @@ export function createDefaultRules(
     ...createFinancialRules(treasuryPolicy),
     ...createAuthorityRules(),
     ...createRateLimitRules(),
+    // M1-B6: protected-kernel integrity gate. Evaluates first (lowest
+    // priority number) so nothing can outrank it; denies financial/spawn/
+    // self-mod tools whenever the boot-time kernel verification degraded.
+    createKernelIntegrityRule(),
   ];
 }

@@ -61,6 +61,24 @@ jobs:
       - name: Deny unsanctioned raw fetch()/execSync()
         run: node scripts/check-source-hygiene.mjs
 
+  kernel-manifest:
+    # M1-B6 (preflight §10): FAIL-CLOSED protected-kernel integrity check.
+    # Runs BEFORE install and tests: the manifest must match the committed
+    # kernel files, or the whole pipeline is red. Dependency-free script so
+    # the integrity check itself cannot be subverted by the supply chain it
+    # verifies. The agent runtime enforces the same manifest at boot
+    # (src/governance/kernel.ts); this job enforces it at review time.
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Verify protected-kernel manifest (fail-closed)
+        run: node scripts/check-kernel-manifest.mjs
+
   security-audit:
     # M1-B5 (F7.2): FAIL-CLOSED dependency audit. The previous step ended in
     # `|| true`, so high/critical advisories could never fail CI. Enforcement

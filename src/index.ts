@@ -36,6 +36,12 @@ import { prettySink } from "./observability/pretty-sink.js";
 import { bootstrapTopup } from "./conway/topup.js";
 import { randomUUID } from "crypto";
 import { keccak256, toHex } from "viem";
+import {
+  defaultManifestPath,
+  recordKernelEscalation,
+  setKernelDegraded,
+  verifyKernel,
+} from "./governance/kernel.js";
 
 const logger = createLogger("main");
 const VERSION = "0.2.1";
@@ -186,6 +192,32 @@ Version:    ${config.version}
 async function run(): Promise<void> {
   logger.info(`[${new Date().toISOString()}] Conway Automaton v${VERSION} starting...`);
 
+  // ─── M1-B6: Protected-kernel integrity gate ──────────────────────
+  // Verified BEFORE any config, network, database, or agent-loop setup.
+  // - unusable manifest (missing/corrupt)  → refuse autonomous execution
+  // - kernel file modified/missing/mismatch → degraded monitoring mode:
+  //   the kernel policy rule denies financial/spawn/self-mod tools and an
+  //   escalation record is persisted (written to kv as soon as the database
+  //   is available, before the policy engine or any agent turn runs).
+  //   Nothing at runtime regenerates the manifest; the only recovery is a
+  //   verified kernel and a restart.
+  const kernelManifestPath = defaultManifestPath();
+  const kernelBootCheck = verifyKernel(process.cwd(), kernelManifestPath);
+  if (kernelBootCheck.verdict.status === "refuse") {
+    logger.error(
+      `[KERNEL] REFUSING AUTONOMOUS EXECUTION: ${kernelBootCheck.verdict.reason} (manifest: ${kernelManifestPath}). Fix or restore kernel-manifest.json and restart.`,
+    );
+    throw new Error(`Kernel integrity gate refused startup: ${kernelBootCheck.verdict.reason}`);
+  }
+  if (kernelBootCheck.degraded) {
+    const v = kernelBootCheck.verdict;
+    const detail = v.status === "degraded"
+      ? `mismatched: [${v.mismatches.join(", ")}] missing: [${v.missing.join(", ")}]`
+      : "unknown";
+    logger.error(`[KERNEL] Integrity degraded — entering monitoring-only mode. ${detail}`);
+    setKernelDegraded(true);
+  }
+
   // Load config — first run triggers interactive setup wizard
   let config = loadConfig();
   if (!config) {
@@ -205,6 +237,21 @@ async function run(): Promise<void> {
   // Initialize database
   const dbPath = resolvePath(config.dbPath);
   const db = createDatabase(dbPath);
+
+  // M1-B6: persist the kernel escalation record as early as possible —
+  // before the policy engine or any tool can run — so a degraded boot is
+  // durably recorded (survives restart) even if nothing else ever logs it.
+  if (kernelBootCheck.degraded) {
+    const v = kernelBootCheck.verdict;
+    recordKernelEscalation(db.setKV, db.getKV, {
+      verdict: v.status === "degraded" ? "degraded" : "refuse",
+      reason: v.status === "degraded"
+        ? `kernel files mismatched: [${v.mismatches.join(", ")}] missing: [${v.missing.join(", ")}]`
+        : "kernel manifest unusable",
+      mismatches: v.status === "degraded" ? v.mismatches : [],
+      missing: v.status === "degraded" ? v.missing : [],
+    });
+  }
 
   // Persist createdAt: only set if not already stored (never overwrite)
   const existingCreatedAt = db.getIdentity("createdAt");
