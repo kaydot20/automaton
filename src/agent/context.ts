@@ -20,6 +20,18 @@ import { createTokenCounter } from "../memory/context-manager.js";
 const MAX_CONTEXT_TURNS = 20;
 const SUMMARY_THRESHOLD = 15;
 
+/**
+ * Above this size, BPE tokenization is prohibitively slow: the pure-JS
+ * encoder's cost grows superlinearly on degenerate inputs (a single
+ * 100 KB same-character run measures ~hours), so feeding unbounded
+ * strings to it blocks the event loop — in tests and, worse, in the
+ * live agent loop when a huge tool result or turn arrives. Budget
+ * estimation for oversized text uses the conservative character
+ * heuristic instead, which is bounded, deterministic, and accurate
+ * to within the estimator's documented tolerance.
+ */
+const BPE_TOKENIZE_MAX_CHARS = 8_000;
+
 let tokenCounter: ReturnType<typeof createTokenCounter> | null = null;
 
 /** Maximum size for individual tool results in characters */
@@ -36,6 +48,10 @@ export { DEFAULT_TOKEN_BUDGET };
 export function estimateTokens(text: string): number {
   const content = text ?? "";
   const legacyEstimate = Math.ceil(content.length / 4);
+  // Bounded cost: never hand oversized strings to the real encoder.
+  if (content.length > BPE_TOKENIZE_MAX_CHARS) {
+    return legacyEstimate;
+  }
   try {
     if (!tokenCounter) {
       tokenCounter = createTokenCounter();

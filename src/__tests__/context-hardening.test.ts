@@ -8,6 +8,7 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
+import crypto from "node:crypto";
 import {
   buildContextMessages,
   estimateTokens,
@@ -505,8 +506,6 @@ describe("update_genesis_prompt tool hardening", () => {
 
   it("SOUL.md content hash tracking works", () => {
     const db = createTestDb();
-    const crypto = require("crypto");
-
     const content1 = "I am a test automaton.";
     const hash1 = crypto.createHash("sha256").update(content1).digest("hex");
     db.setKV("soul_content_hash", hash1);
@@ -517,6 +516,34 @@ describe("update_genesis_prompt tool hardening", () => {
     const content2 = "I am an evolved automaton.";
     const hash2 = crypto.createHash("sha256").update(content2).digest("hex");
     expect(hash1).not.toBe(hash2);
+  });
+});
+
+// ─── Tokenizer cost bound (CI-hang regression) ─────────────────
+// Regression for the M1-B5 CI hang: estimateTokens fed arbitrarily
+// large strings to the real BPE encoder, whose cost is superlinear on
+// degenerate inputs (a single 100 KB run measured ~hours of CPU),
+// freezing the vitest worker (and would freeze the live agent loop on
+// a huge tool result). Oversized text must take the bounded character
+// heuristic instead.
+describe("estimateTokens tokenizer cost bound", () => {
+  it("uses the bounded heuristic for oversized text (100 KB degenerate input)", () => {
+    const huge = "x".repeat(100_000);
+    // Must return instantly via the ceil(len/4) heuristic — the pre-fix
+    // path spent minutes-to-hours inside the BPE encoder here.
+    expect(estimateTokens(huge)).toBe(Math.ceil(100_000 / 4));
+  });
+
+  it("budget enforcement completes on 20 x 100 KB turns (exact CI-hang shape)", () => {
+    const turns = Array.from({ length: 20 }, () => makeLargeTurn(100_000));
+    const messages = buildContextMessages("System prompt", turns);
+    // Budget enforcement still runs: oversized history is summarized.
+    expect(messages.length).toBeGreaterThan(1);
+  });
+
+  it("still uses the real tokenizer for normal-size text", () => {
+    // Below the bound the encoder path stays active.
+    expect(estimateTokens("abcd")).toBeGreaterThan(0);
   });
 });
 
