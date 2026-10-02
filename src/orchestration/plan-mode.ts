@@ -43,6 +43,15 @@ export type PlanApprovalMode = "auto" | "supervised" | "consensus";
 export const PLAN_BUDGET_EXCEEDED = "PLAN_BUDGET_EXCEEDED";
 export const PLAN_COST_INVALID = "PLAN_COST_INVALID";
 export const PLAN_COST_MISMATCH = "PLAN_COST_MISMATCH";
+/**
+ * Consensus review is not implemented. The mode is a stub, so it denies
+ * rather than approving a review that never happened (preflight §F1.1:
+ * "Consensus mode stays a stub but must default to *deny*, not approve").
+ * Deliberately NOT one of the cost reason codes above: nothing about this
+ * outcome is about budget or plan cost, and reusing those would misreport
+ * why the plan was refused.
+ */
+export const CONSENSUS_MODE_UNAVAILABLE = "CONSENSUS_MODE_UNAVAILABLE";
 
 /**
  * Tolerance (in cents) for floating-point dust when comparing the declared
@@ -349,9 +358,17 @@ export async function reviewPlan(
     }
 
     case "consensus": {
+      // Fail closed (preflight §F1.1 / §A "Disabled" row). The consensus
+      // critic is a stub: no critic is ever invoked, so approving here would
+      // grant autonomous execution on the strength of a review that did not
+      // happen. The stub diagnostics are preserved so an operator who
+      // selected this mode learns which role/timeout would have been used
+      // and that the mode is unavailable, not that their plan was rejected
+      // on cost grounds.
       return {
-        approved: true,
-        feedback: `Consensus review stub (critic role '${normalized.consensusCriticRole}', timeout ${normalized.reviewTimeoutMs}ms).`,
+        approved: false,
+        reason: CONSENSUS_MODE_UNAVAILABLE,
+        feedback: `Consensus review is not implemented (critic role '${normalized.consensusCriticRole}', timeout ${normalized.reviewTimeoutMs}ms); autonomous execution is denied (fail-closed). No critic review was performed.`,
       };
     }
 

@@ -4,6 +4,8 @@ import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
+  CONSENSUS_MODE_UNAVAILABLE,
+  PLAN_BUDGET_EXCEEDED,
   PlanModeController,
   loadPlan,
   persistPlan,
@@ -380,7 +382,19 @@ describe("orchestration/plan-mode", () => {
       await expect(reviewPlan(makePlan(), supervised)).rejects.toThrow("awaiting human approval");
     });
 
-    it("consensus mode returns approval feedback", async () => {
+    // ─── Consensus is a stub and must deny (preflight §F1.1, test (d)) ──
+    //
+    // M1 completeness remediation: the stub previously returned
+    // `approved: true`, so selecting consensus mode granted autonomous
+    // execution on the strength of a critic review that never ran. §F1.1
+    // requires "Consensus mode stays a stub but must default to *deny*,
+    // not approve", and §A lists it under Disabled as "(deny-by-default)".
+    //
+    // This is a contract on `reviewPlan` itself, not a statement about the
+    // current caller: the orchestrator hardcodes `mode: "auto"`, so consensus
+    // is unreachable from that path today. The exported function must still
+    // fail closed, because reachability is a property of the caller.
+    it("consensus mode denies by default", async () => {
       const consensus: PlanApprovalConfig = {
         ...autoConfig,
         mode: "consensus",
@@ -388,11 +402,80 @@ describe("orchestration/plan-mode", () => {
         reviewTimeoutMs: 9000,
       };
       const result = await reviewPlan(makePlan(), consensus);
-      expect(result.approved).toBe(true);
+      expect(result.approved).toBe(false);
+      expect(result.reason).toBe(CONSENSUS_MODE_UNAVAILABLE);
+    });
+
+    it("consensus denial preserves the stub's critic/timeout diagnostics", async () => {
+      const consensus: PlanApprovalConfig = {
+        ...autoConfig,
+        mode: "consensus",
+        consensusCriticRole: "critic",
+        reviewTimeoutMs: 9000,
+      };
+      const result = await reviewPlan(makePlan(), consensus);
+      // Operator-facing diagnostics survive the fail-closed change.
       expect(result.feedback).toContain("critic role 'critic'");
+      expect(result.feedback).toContain("9000ms");
+      expect(result.feedback).toContain("not implemented");
+      // …and the refusal must not be misattributed to budget or plan cost.
+      expect(result.reason).not.toBe(PLAN_BUDGET_EXCEEDED);
+    });
+
+    it("consensus denies even for a plan that is under the budget ceiling", async () => {
+      // The consensus stub never inspects cost, so a trivially cheap plan is
+      // denied for the same reason. This pins that the denial is mode-driven
+      // and not a cost gate wearing a different label.
+      const consensus: PlanApprovalConfig = {
+        ...autoConfig,
+        mode: "consensus",
+        consensusCriticRole: "critic",
+        reviewTimeoutMs: 9000,
+      };
+      const result = await reviewPlan(makePlan({ estimatedTotalCostCents: 1 }), consensus);
+      expect(result.approved).toBe(false);
+      expect(result.reason).toBe(CONSENSUS_MODE_UNAVAILABLE);
+    });
+
+    it("consensus mode is unaffected by the auto budget threshold", async () => {
+      // Raising or lowering the ceiling must never make consensus approve.
+      for (const autoBudgetThreshold of [0, 5000, 10_000_000]) {
+        const consensus: PlanApprovalConfig = {
+          ...autoConfig,
+          mode: "consensus",
+          autoBudgetThreshold,
+          consensusCriticRole: "critic",
+          reviewTimeoutMs: 9000,
+        };
+        const result = await reviewPlan(makePlan({ estimatedTotalCostCents: 1200 }), consensus);
+        expect(result.approved).toBe(false);
+        expect(result.reason).toBe(CONSENSUS_MODE_UNAVAILABLE);
+      }
     });
 
     // ─── Autonomous budget ceiling (M1-B1) ───────────────────────
+
+    it("auto mode is unchanged by the consensus fail-closed fix", async () => {
+      // Cross-mode regression: the identical plan must still be approved
+      // under `auto` while being denied under `consensus`. This pins the
+      // remediation as mode-scoped — it must not have widened the denial
+      // into the B1 budget path, which is the only production path today.
+      const consensus: PlanApprovalConfig = {
+        ...autoConfig,
+        mode: "consensus",
+        consensusCriticRole: "critic",
+        reviewTimeoutMs: 9000,
+      };
+      const plan = makePlan({ estimatedTotalCostCents: 1200 });
+
+      const underAuto = await reviewPlan(plan, autoConfig);
+      expect(underAuto.approved).toBe(true);
+      expect(underAuto.reason).toBeUndefined();
+
+      const underConsensus = await reviewPlan(plan, consensus);
+      expect(underConsensus.approved).toBe(false);
+      expect(underConsensus.reason).toBe(CONSENSUS_MODE_UNAVAILABLE);
+    });
 
     it("auto mode approves a plan exactly at the threshold", async () => {
       const result = await reviewPlan(makePlan({ estimatedTotalCostCents: 5000 }), autoConfig);
