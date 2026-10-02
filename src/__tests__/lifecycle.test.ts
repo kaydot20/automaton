@@ -658,12 +658,38 @@ describe("Genesis Validation", () => {
       specialization: "data analysis",
     });
 
+    // M1-B10 (S7): the <lineage> offspring block is replaced by
+    // <assignment>. The test's original intent — structured XML delimiters
+    // rather than injection-prone --- delimiters — is preserved.
     expect(genesis.genesisPrompt).toContain("<specialization>");
     expect(genesis.genesisPrompt).toContain("</specialization>");
-    expect(genesis.genesisPrompt).toContain("<lineage>");
-    expect(genesis.genesisPrompt).toContain("</lineage>");
+    expect(genesis.genesisPrompt).toContain("<assignment>");
+    expect(genesis.genesisPrompt).toContain("</assignment>");
     expect(genesis.genesisPrompt).not.toContain("--- SPECIALIZATION ---");
     expect(genesis.genesisPrompt).not.toContain("--- LINEAGE ---");
+    // S7: the descendant/inheritance narrative is gone.
+    expect(genesis.genesisPrompt).not.toContain("<lineage>");
+    expect(genesis.genesisPrompt).not.toContain("inherit their mission");
+  });
+
+  it("generateGenesisConfig states the worker scope when one is declared", () => {
+    // M1-B10 (S7): a worker prompt carries its job and its bounds.
+    const genesis = generateGenesisConfig(
+      identity,
+      config,
+      { name: "scoped-worker" },
+      {
+        job: "summarize the Q3 report",
+        role: "research",
+        expiresAt: "2030-01-01T00:00:00.000Z",
+        fundingCapCents: 1234,
+      },
+    );
+
+    expect(genesis.genesisPrompt).toContain("summarize the Q3 report");
+    expect(genesis.genesisPrompt).toContain("research");
+    expect(genesis.genesisPrompt).toContain("2030-01-01T00:00:00.000Z");
+    expect(genesis.genesisPrompt).toContain("1234 cents");
   });
 
   it("generateGenesisConfig returns frozen object", () => {

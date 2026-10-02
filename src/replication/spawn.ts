@@ -50,7 +50,11 @@ export function isValidWalletAddress(address: string, chainType?: ChainType): bo
 }
 
 /**
- * Spawn a child automaton in a new Conway sandbox using lifecycle state machine.
+ * Spawn a worker in a new Conway sandbox using the lifecycle state machine.
+ *
+ * M1-B10 (S7): `providedChildId` may be supplied by the caller so the worker
+ * scope manifest can be written under the same id BEFORE the sandbox exists.
+ * When omitted the id is generated here (legacy behaviour).
  */
 export async function spawnChild(
   conway: ConwayClient,
@@ -58,6 +62,7 @@ export async function spawnChild(
   db: AutomatonDatabase,
   genesis: GenesisConfig,
   lifecycle?: ChildLifecycle,
+  providedChildId?: string,
 ): Promise<ChildAutomaton> {
   // Check child limit from config
   const existing = db
@@ -75,7 +80,7 @@ export async function spawnChild(
     );
   }
 
-  const childId = ulid();
+  const childId = providedChildId ?? ulid();
   let sandboxId: string | undefined;
   let reusedSandbox: { id: string } | null = null;
 

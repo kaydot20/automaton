@@ -26,6 +26,10 @@ const FINANCIAL_TOOLS = [
 const SPAWN_TOOLS = [
   "spawn_child",
   "delete_sandbox",
+  // M1-B10 scoped workers: worker revocation is worker-authority, not
+  // observability. While the kernel is unverified the runtime must not be
+  // able to alter worker scope state either.
+  "revoke_worker",
 ] as const;
 
 /** Self-modification tools — denied while the kernel is unverified. */

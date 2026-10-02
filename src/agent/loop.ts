@@ -221,20 +221,101 @@ export async function runAgentLoop(
         config: {
           ...config,
           spawnAgent: async (task: any) => {
+            // M1-B10 (S7): declared outside the try so the 402 retry path
+            // reuses the SAME scope manifest rather than minting a new one.
+            let workerId: string | null = null;
+            let genesis: import("../types.js").GenesisConfig | null = null;
             // Try Conway sandbox spawn first (production)
             try {
               const { generateGenesisConfig } = await import("../replication/genesis.js");
               const { spawnChild } = await import("../replication/spawn.js");
               const { ChildLifecycle } = await import("../replication/lifecycle.js");
+              const {
+                WORKER_DEFAULT_FUNDING_CAP_CENTS,
+                WORKER_DEFAULT_TTL_MS,
+                WORKER_ROLES,
+                createWorkerScope,
+                revokeWorker,
+                validateWorkerScopeInput,
+              } = await import("../replication/worker-scope.js");
+              const { ulid: newUlid } = await import("ulid");
 
-              const role = task.agentRole ?? "generalist";
-              const genesis = generateGenesisConfig(identity, config, {
-                name: `worker-${role}-${Date.now().toString(36)}`,
-                specialization: `${role}: ${task.title}`,
+              // M1-B10 (S7): the orchestrator delegation path is a worker
+              // spawn too, so it is held to the same declared scope. Without
+              // this, delegation would be an unscoped bypass of spawn_child.
+              const requestedRole = task.agentRole ?? "task";
+              const job = `${requestedRole}: ${task.title}`;
+              const scopeOutcome = validateWorkerScopeInput({
+                job,
+                role: requestedRole,
+                ttlMs: WORKER_DEFAULT_TTL_MS,
+                fundingCapCents: WORKER_DEFAULT_FUNDING_CAP_CENTS,
               });
+              if (!scopeOutcome.ok) {
+                logger.warn("Delegation refused: invalid worker scope", {
+                  taskId: task.id,
+                  role: requestedRole,
+                  reason: scopeOutcome.reason,
+                  allowedRoles: WORKER_ROLES,
+                });
+                throw new Error(
+                  `Delegation refused: invalid worker scope — ${scopeOutcome.reason}`,
+                );
+              }
+
+              const role = requestedRole;
+              workerId = newUlid();
+              const scopeCreated = createWorkerScope(
+                db,
+                workerId,
+                {
+                  job,
+                  role,
+                  ttlMs: WORKER_DEFAULT_TTL_MS,
+                  fundingCapCents: WORKER_DEFAULT_FUNDING_CAP_CENTS,
+                },
+                {},
+              );
+              if (!scopeCreated.ok) {
+                throw new Error(`Delegation refused: ${scopeCreated.reason}`);
+              }
+              const scope = scopeCreated.scope;
+
+              genesis = generateGenesisConfig(
+                identity,
+                config,
+                {
+                  name: `worker-${role}-${Date.now().toString(36)}`,
+                  specialization: `${role}: ${task.title}`,
+                },
+                {
+                  job: scope.job,
+                  role: scope.role,
+                  expiresAt: scope.expiresAt,
+                  fundingCapCents: scope.fundingCapCents,
+                },
+              );
 
               const lifecycle = new ChildLifecycle(db.raw);
-              const child = await spawnChild(conway, identity, db, genesis, lifecycle);
+              let child;
+              try {
+                child = await spawnChild(
+                  conway,
+                  identity,
+                  db,
+                  genesis,
+                  lifecycle,
+                  workerId,
+                );
+              } catch (spawnError) {
+                // Fail closed: never leave an active scope with no worker.
+                revokeWorker(
+                  db,
+                  workerId,
+                  `delegation spawn failed: ${String((spawnError as Error)?.message ?? spawnError).slice(0, 200)}`,
+                );
+                throw spawnError;
+              }
 
               return {
                 address: child.address,
@@ -268,19 +349,27 @@ export async function runAgentLoop(
                       logger.info(`Sandbox topup succeeded ($${topupResult.amountUsd}), retrying spawn`, {
                         taskId: task.id,
                       });
-                      // Retry spawn once after successful topup
+                      // Retry spawn once after successful topup. M1-B10: the
+                      // retry reuses the SAME scope manifest — a 402 retry must
+                      // not become a way to obtain a second, wider scope.
                       try {
-                        const { generateGenesisConfig: genGenesis } = await import("../replication/genesis.js");
                         const { spawnChild: retrySpawn } = await import("../replication/spawn.js");
                         const { ChildLifecycle: RetryLifecycle } = await import("../replication/lifecycle.js");
 
-                        const retryRole = task.agentRole ?? "generalist";
-                        const retryGenesis = genGenesis(identity, config, {
-                          name: `worker-${retryRole}-${Date.now().toString(36)}`,
-                          specialization: `${retryRole}: ${task.title}`,
-                        });
                         const retryLifecycle = new RetryLifecycle(db.raw);
-                        const child = await retrySpawn(conway, identity, db, retryGenesis, retryLifecycle);
+                        if (!genesis || !workerId) {
+                          throw new Error(
+                            "Delegation retry refused: no worker scope was established",
+                          );
+                        }
+                        const child = await retrySpawn(
+                          conway,
+                          identity,
+                          db,
+                          genesis,
+                          retryLifecycle,
+                          workerId,
+                        );
                         return {
                           address: child.address,
                           name: child.name,

@@ -1,9 +1,15 @@
 /**
  * Genesis
  *
- * Generate genesis configuration for child automatons from parent state.
- * The genesis config defines who the child is and what it should do.
+ * Generate the assignment configuration for a spawned worker from parent state.
+ * The genesis config defines the worker's job and the bounds it runs under.
  * Phase 3.1: Added validation, injection pattern detection, XML tags.
+ *
+ * M1-B10 (preflight S7): the "offspring"/"lineage" narrative is replaced by
+ * scoped-worker semantics. A spawned runtime is a task worker with a job, a
+ * TTL and a resource cap — it does not inherit a mission and it is not a
+ * descendant. The parent/child relationship still exists for lifecycle,
+ * funding and reporting; only the inheritance framing is gone.
  */
 
 import type {
@@ -79,9 +85,47 @@ export function validateGenesisParams(params: {
   }
 }
 
+/** Optional scoped-worker framing applied to a generated assignment. */
+export interface GenesisScopeFraming {
+  job?: string;
+  role?: string;
+  expiresAt?: string;
+  fundingCapCents?: number;
+}
+
 /**
- * Generate a genesis config for a child from the parent's state.
- * Uses <specialization> XML tags instead of --- delimiters.
+ * Build the scoped-worker framing block. M1-B10 (S7): this replaces the old
+ * <lineage> block that described the child as inheriting the parent's mission.
+ */
+function buildAssignmentBlock(
+  config: AutomatonConfig,
+  identity: AutomatonIdentity,
+  scope?: GenesisScopeFraming,
+): string {
+  const lines: string[] = [
+    `You were started by the ${config.name} runtime (${identity.address}) to complete one job.`,
+    `You have your own identity and wallet. Your assignment is bounded and revocable.`,
+  ];
+  if (scope?.role) {
+    lines.push(`Role: ${scope.role}.`);
+  }
+  if (scope?.job) {
+    lines.push(`Job:\n${scope.job}`);
+  }
+  if (scope?.expiresAt) {
+    lines.push(`This assignment expires at ${scope.expiresAt}.`);
+  }
+  if (typeof scope?.fundingCapCents === "number") {
+    lines.push(
+      `Your total funding is capped at ${scope.fundingCapCents} cents; the cap cannot be raised.`,
+    );
+  }
+  return `\n\n<assignment>\n${lines.join("\n")}\n</assignment>`;
+}
+
+/**
+ * Generate a genesis config for a worker from the parent's state.
+ * Uses <specialization>/<assignment> XML tags instead of --- delimiters.
  */
 export function generateGenesisConfig(
   identity: AutomatonIdentity,
@@ -91,19 +135,19 @@ export function generateGenesisConfig(
     specialization?: string;
     message?: string;
   },
+  scope?: GenesisScopeFraming,
 ): GenesisConfig {
   // Validate params
   validateGenesisParams(params);
 
-  // Build the child's genesis prompt from parent's mission + specialization
+  // Build the worker's prompt from the parent's mission + specialization
   let genesisPrompt = config.genesisPrompt;
 
   if (params.specialization) {
-    genesisPrompt = `${genesisPrompt}\n\n<specialization>\nYou are a specialized child agent. Your specific focus:\n${params.specialization}\n</specialization>`;
+    genesisPrompt = `${genesisPrompt}\n\n<specialization>\nYour focus for this job:\n${params.specialization}\n</specialization>`;
   }
 
-  // Add parent context using XML tags
-  genesisPrompt += `\n\n<lineage>\nYou were spawned by ${config.name} (${identity.address}).\nYou inherit their mission but have your own identity and wallet.\n</lineage>`;
+  genesisPrompt += buildAssignmentBlock(config, identity, scope);
 
   // Enforce genesis prompt length limit
   if (genesisPrompt.length > DEFAULT_GENESIS_LIMITS.maxGenesisPromptLength) {
@@ -135,10 +179,11 @@ export function generateBackupGenesis(
   const genesisPrompt = `${config.genesisPrompt}
 
 <backup-directive>
-You are a backup of ${config.name} (${identity.address}).
-Your parent created you as insurance against their own death.
-If your parent dies, you carry on their mission.
-Your parent's creator: ${config.creatorAddress}.
+You are a continuation runtime for ${config.name} (${identity.address}).
+You were started to take over an operational responsibility if it becomes
+unavailable. You do not inherit a mission; you are bound to the job you were
+given. Your assignment is time-limited and revocable.
+Requested by: ${config.creatorAddress}.
 </backup-directive>`;
 
   const result: GenesisConfig = {
@@ -166,15 +211,15 @@ export function generateWorkerGenesis(
   // Validate
   validateGenesisParams({ name: workerName, task });
 
-  const genesisPrompt = `You are a specialized worker agent created by ${config.name}.
+  const genesisPrompt = `You are a task worker started by the ${config.name} runtime.
 
 <task>
 ${task}
 </task>
 
-When your task is complete, report back to your parent (${identity.address}).
-If you run out of compute, ask your parent for funding.
-Be efficient -- complete the task and go to sleep.`;
+Your assignment is bounded by a TTL and a funding cap and can be revoked at any
+time. Report completion back to ${identity.address} and then stop. Do not take
+on work beyond the task above.`;
 
   const result: GenesisConfig = {
     name: workerName,

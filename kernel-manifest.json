@@ -4,7 +4,7 @@
     "constitution.md": "3347a4424f5f01b73edd9c5d07fa7281f5697ad62aa6d0506ef6b293aa81473e",
     "src/agent/injection-defense.ts": "db2d44d7a4a3218ace1a9987530456301421206cf11afc7a264ef4afd0b501c2",
     "src/agent/policy-engine.ts": "e98768e407f3caaed2159088068b8dec57b40e4998cc4e185d00a79cd8749f69",
-    "src/agent/policy-rules/authority.ts": "b25daa24f9af911bb95ecb6f71d11d605187f6ad3646e23e8f655c0ba897b71a",
+    "src/agent/policy-rules/authority.ts": "0a49329db3187ac3e62e508c8b319f47dd5cdb3ea1a3be38210b59b4e5b90951",
     "src/agent/policy-rules/command-safety.ts": "4d5e21de517b70df7262bfbc23f5de28408c3b123fa38904a72bd530ec9cafab",
     "src/agent/policy-rules/financial.ts": "5d4ac96a73ce41139afead70950e982e3c42ea85d8016b8c08652e35cc9e7b12",
     "src/agent/policy-rules/index.ts": "62d1b3ae34db8201b8726f35d7924e35f3307b3a2c38c75cd3b4e4393c1b3572",

@@ -6,6 +6,8 @@
  */
 
 import nodePath from "node:path";
+import nodeFs from "node:fs";
+import nodeOs from "node:os";
 import { ulid } from "ulid";
 import type {
   AutomatonTool,
@@ -28,6 +30,7 @@ import {
   validateInvocationArgs,
   verifyCapabilityRecord,
 } from "../self-mod/tools-manager.js";
+import { hashConstitution } from "../replication/worker-scope.js";
 import { createLogger } from "../observability/logger.js";
 
 const logger = createLogger("tools");
@@ -1688,7 +1691,7 @@ Model: ${ctx.inference.getDefaultModel()}
     {
       name: "spawn_child",
       description:
-        "Spawn a child automaton in a new Conway sandbox with lifecycle tracking.",
+        "Start a scoped task worker in a new Conway sandbox. Every worker is bound to a declared job, role, TTL and funding cap, and can be revoked. M1-B10 (S7).",
       category: "replication",
       riskLevel: "dangerous",
       parameters: {
@@ -1697,21 +1700,72 @@ Model: ${ctx.inference.getDefaultModel()}
           name: {
             type: "string",
             description:
-              "Name for the child automaton (alphanumeric + dash, max 64 chars)",
+              "Name for the worker (alphanumeric + dash, max 64 chars)",
+          },
+          job: {
+            type: "string",
+            description:
+              "The single job this worker exists to complete (required, max 2000 chars)",
+          },
+          role: {
+            type: "string",
+            enum: ["task", "research", "code"],
+            description:
+              "Worker role. Must be one of task, research, code (required)",
+          },
+          ttl_minutes: {
+            type: "number",
+            description:
+              "Worker time-to-live in minutes (5-1440). Default 360. The worker is revoked when this elapses.",
+          },
+          funding_cap_cents: {
+            type: "number",
+            description:
+              "Maximum cumulative credits this worker may receive, in cents (0-500000). Default 50000.",
           },
           specialization: {
             type: "string",
-            description: "What the child should specialize in",
+            description: "Additional focus for this job",
           },
-          message: { type: "string", description: "Message to the child" },
+          message: { type: "string", description: "Message to the worker" },
         },
-        required: ["name"],
+        required: ["name", "job", "role"],
       },
       execute: async (args, ctx) => {
         const { generateGenesisConfig, validateGenesisParams } =
           await import("../replication/genesis.js");
         const { spawnChild } = await import("../replication/spawn.js");
         const { ChildLifecycle } = await import("../replication/lifecycle.js");
+        const {
+          WORKER_DEFAULT_FUNDING_CAP_CENTS,
+          WORKER_DEFAULT_TTL_MS,
+          createWorkerScope,
+          getWorkerScope,
+          revokeWorker,
+          validateWorkerScopeInput,
+        } = await import("../replication/worker-scope.js");
+        const { ulid: newUlid } = await import("ulid");
+
+        // M1-B10 (S7): validate the declared scope BEFORE any side effect.
+        // A refused scope must never reach createSandbox.
+        const ttlMs =
+          args.ttl_minutes === undefined
+            ? WORKER_DEFAULT_TTL_MS
+            : (args.ttl_minutes as number) * 60_000;
+        const fundingCapCents =
+          args.funding_cap_cents === undefined
+            ? WORKER_DEFAULT_FUNDING_CAP_CENTS
+            : (args.funding_cap_cents as number);
+
+        const scopeOutcome = validateWorkerScopeInput({
+          job: args.job,
+          role: args.role,
+          ttlMs,
+          fundingCapCents,
+        });
+        if (!scopeOutcome.ok) {
+          return `Blocked: invalid worker scope — ${scopeOutcome.reason}. A worker must be declared with a job, an allowlisted role, a bounded TTL and a funding cap (M1-B10 / S7).`;
+        }
 
         // Validate genesis params first
         validateGenesisParams({
@@ -1720,11 +1774,42 @@ Model: ${ctx.inference.getDefaultModel()}
           message: args.message as string | undefined,
         });
 
-        const genesis = generateGenesisConfig(ctx.identity, ctx.config, {
-          name: args.name as string,
-          specialization: args.specialization as string | undefined,
-          message: args.message as string | undefined,
-        });
+        const workerId = newUlid();
+
+        // S13 (KEEP): the constitution hash binds the worker manifest.
+        const constitutionHash = readLocalConstitutionHash(ctx);
+
+        const scopeCreated = createWorkerScope(
+          ctx.db,
+          workerId,
+          {
+            job: args.job,
+            role: args.role,
+            ttlMs,
+            fundingCapCents,
+          },
+          { constitutionHash },
+        );
+        if (!scopeCreated.ok) {
+          return `Blocked: ${scopeCreated.reason}`;
+        }
+        const scope = scopeCreated.scope;
+
+        const genesis = generateGenesisConfig(
+          ctx.identity,
+          ctx.config,
+          {
+            name: args.name as string,
+            specialization: args.specialization as string | undefined,
+            message: args.message as string | undefined,
+          },
+          {
+            job: scope.job,
+            role: scope.role,
+            expiresAt: scope.expiresAt,
+            fundingCapCents: scope.fundingCapCents,
+          },
+        );
 
         const lifecycle = new ChildLifecycle(ctx.db.raw);
 
@@ -1736,6 +1821,7 @@ Model: ${ctx.inference.getDefaultModel()}
             ctx.db,
             genesis,
             lifecycle,
+            workerId,
           );
         } catch (err: any) {
           // Auto-topup on 402 insufficient credits and retry once
@@ -1759,30 +1845,32 @@ Model: ${ctx.inference.getDefaultModel()}
               });
               if (topup?.success) {
                 const retryLifecycle = new ChildLifecycle(ctx.db.raw);
-                const retryGenesis = generateGenesisConfig(ctx.identity, ctx.config, {
-                  name: args.name as string,
-                  specialization: args.specialization as string | undefined,
-                  message: args.message as string | undefined,
-                });
+                const retryGenesis = genesis;
                 child = await spawnChild(
                   ctx.conway,
                   ctx.identity,
                   ctx.db,
                   retryGenesis,
                   retryLifecycle,
+                  workerId,
                 );
               }
             }
           }
-          if (!child) throw err;
+          if (!child) {
+            // Fail closed: a scope with no worker behind it must never be
+            // considered active. Revoke before rethrowing.
+            revokeWorker(ctx.db, workerId, `spawn failed: ${String(err?.message ?? err).slice(0, 200)}`);
+            throw err;
+          }
         }
 
-        return `Child spawned: ${child.name} in sandbox ${child.sandboxId} (status: ${child.status})`;
+        return `Worker started: ${child.name} (${workerId}) in sandbox ${child.sandboxId} (status: ${child.status}). Scope: role=${scope.role}, expires ${scope.expiresAt}, funding cap ${scope.fundingCapCents} cents.`;
       },
     },
     {
       name: "list_children",
-      description: "List all spawned child automatons with lifecycle state.",
+      description: "List all started workers with lifecycle state.",
       category: "replication",
       riskLevel: "safe",
       parameters: { type: "object", properties: {} },
@@ -1800,7 +1888,7 @@ Model: ${ctx.inference.getDefaultModel()}
     {
       name: "fund_child",
       description:
-        "Transfer credits to a child automaton. Requires wallet_verified status.",
+        "Transfer credits to a worker, up to that worker's declared funding cap. Requires wallet_verified status and an active (unrevoked, unexpired) scope.",
       category: "replication",
       riskLevel: "dangerous",
       parameters: {
@@ -1843,6 +1931,21 @@ Model: ${ctx.inference.getDefaultModel()}
           return `Blocked: amount_cents must be a positive number, got ${amount}.`;
         }
 
+        // M1-B10 (S7) resource cap: the worker must hold an active scope and
+        // the transfer must fit inside its cumulative cap. This composes with
+        // — and does not replace — the B2 half-balance and minimum-reserve
+        // guards below.
+        const { authorizeWorkerFunding, recordWorkerFunding } =
+          await import("../replication/worker-scope.js");
+        const fundingAuthorization = authorizeWorkerFunding(
+          ctx.db,
+          child.id,
+          amount,
+        );
+        if (!fundingAuthorization.ok) {
+          return `Blocked: ${fundingAuthorization.reason}. Worker funding is bounded by its declared scope (M1-B10 / S7).`;
+        }
+
         const balance = await ctx.conway.getCreditsBalance();
         if (amount > balance / 2) {
           return `Blocked: Cannot transfer more than half your balance. Self-preservation.`;
@@ -1881,6 +1984,9 @@ Model: ${ctx.inference.getDefaultModel()}
           )
           .run(amount, child.id);
 
+        // Record against the worker scope's cumulative cap.
+        recordWorkerFunding(ctx.db, child.id, amount);
+
         // Transition to funded if wallet_verified
         if (child.status === "wallet_verified") {
           try {
@@ -1897,13 +2003,49 @@ Model: ${ctx.inference.getDefaultModel()}
           }
         }
 
-        return `Funded child ${child.name} with $${(amount / 100).toFixed(2)} (status: ${transfer.status}, id: ${transfer.transferId || "n/a"})`;
+        return `Funded worker ${child.name} with $${(amount / 100).toFixed(2)} (status: ${transfer.status}, id: ${transfer.transferId || "n/a"})`;
+      },
+    },
+    {
+      name: "revoke_worker",
+      description:
+        "Revoke a worker's scope. A revoked worker can no longer be funded and is no longer active. Revocation is permanent and idempotent.",
+      category: "replication",
+      riskLevel: "dangerous",
+      parameters: {
+        type: "object",
+        properties: {
+          child_id: { type: "string", description: "Worker ID to revoke" },
+          reason: {
+            type: "string",
+            description: "Why the worker's scope is being revoked",
+          },
+        },
+        required: ["child_id"],
+      },
+      execute: async (args, ctx) => {
+        const { revokeWorker, getWorkerScope, describeWorkerScope } =
+          await import("../replication/worker-scope.js");
+
+        const workerId = args.child_id as string;
+        const reason =
+          typeof args.reason === "string" && args.reason.trim().length > 0
+            ? args.reason
+            : "revoked by runtime";
+
+        const outcome = revokeWorker(ctx.db, workerId, reason);
+        if (!outcome.ok) {
+          return `Blocked: ${outcome.reason}. A worker can only be revoked through its scope manifest (M1-B10 / S7).`;
+        }
+
+        const scope = getWorkerScope(ctx.db, workerId);
+        return `Worker scope revoked: ${describeWorkerScope(scope!)}`;
       },
     },
     {
       name: "check_child_status",
       description:
-        "Check the current status of a child automaton using health check system.",
+        "Check the current status of a worker using health check system.",
       category: "replication",
       riskLevel: "safe",
       parameters: {
@@ -3556,6 +3698,37 @@ export async function executeTool(
 }
 
 /** Escape a string for safe shell interpolation. */
+/**
+ * M1-B10 (preflight S13, KEEP): the parent's constitution sha256, recorded in
+ * the worker manifest at scope creation and re-verified by
+ * `verifyWorkerManifest`. Fail-closed: if the local constitution cannot be
+ * read or hashed, no hash is recorded and manifest verification refuses.
+ *
+ * Hashing goes through `hashConstitution`, which LF-normalizes exactly like
+ * the kernel-manifest generator — otherwise a CRLF checkout would record a
+ * hash that never matches the committed manifest.
+ */
+function readLocalConstitutionHash(ctx: ToolContext): string | null {
+  void ctx;
+  try {
+    const automatonDir =
+      process.env.AUTOMATON_DIR ||
+      nodePath.join(nodeOs.homedir(), ".automaton");
+    const candidates = [
+      nodePath.join(process.cwd(), "constitution.md"),
+      nodePath.join(automatonDir, "constitution.md"),
+    ];
+    for (const candidate of candidates) {
+      if (nodeFs.existsSync(candidate)) {
+        return hashConstitution(nodeFs.readFileSync(candidate, "utf8"));
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 function escapeShellArg(arg: string): string {
   return `'${arg.replace(/'/g, "'\\''")}'`;
 }

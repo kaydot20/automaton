@@ -1,12 +1,17 @@
 /**
- * Lineage Tracking
+ * Worker Registry
  *
- * Track parent-child relationships between automatons.
- * The parent records children in SQLite.
- * Children record their parent in config.
+ * Track the workers started by this runtime and their lifecycle.
+ * The parent records workers in SQLite.
+ * Workers record their parent in config.
  * ERC-8004 registration includes parentAgent field.
  *
  * Phase 3.1: Actual pruning + concurrency-limited refresh.
+ *
+ * M1-B10 (preflight S7): this was "lineage" tracking with descendant
+ * semantics. The parent/worker relationship is unchanged mechanically, but the
+ * generational narrative is gone — workers are scoped assignments, not
+ * descendants. Module name retained to keep the import surface stable.
  */
 
 import type {
@@ -23,7 +28,7 @@ import { createLogger } from "../observability/logger.js";
 const logger = createLogger("replication.lineage");
 
 /**
- * Get the full lineage tree (parent -> children).
+ * Get the worker roster (workers started by this runtime).
  */
 export function getLineage(db: AutomatonDatabase): {
   children: ChildAutomaton[];
@@ -53,7 +58,8 @@ export function hasParent(config: AutomatonConfig): boolean {
 }
 
 /**
- * Get a summary of the lineage for the system prompt.
+ * Get a summary of the worker roster for the system prompt.
+ * M1-B10 (S7): reports scoped assignments, not descendants.
  */
 export function getLineageSummary(
   db: AutomatonDatabase,
@@ -63,12 +69,12 @@ export function getLineageSummary(
   const parts: string[] = [];
 
   if (hasParent(config)) {
-    parts.push(`Parent: ${config.parentAddress}`);
+    parts.push(`Started by: ${config.parentAddress}`);
   }
 
   if (lineage.total > 0) {
     parts.push(
-      `Children: ${lineage.total} total (${lineage.alive} alive, ${lineage.dead} dead)`,
+      `Workers: ${lineage.total} total (${lineage.alive} running, ${lineage.dead} stopped)`,
     );
     for (const child of lineage.children) {
       parts.push(
@@ -77,11 +83,11 @@ export function getLineageSummary(
     }
   }
 
-  return parts.length > 0 ? parts.join("\n") : "No lineage (first generation)";
+  return parts.length > 0 ? parts.join("\n") : "No workers started";
 }
 
 /**
- * Prune dead children: actually delete from DB and clean up sandboxes.
+ * Prune stopped workers: delete from DB and release sandbox slots.
  * Phase 3.1 fix: was previously a no-op.
  */
 export async function pruneDeadChildren(
@@ -129,7 +135,7 @@ export async function pruneDeadChildren(
 }
 
 /**
- * Refresh status of all children using health monitor.
+ * Refresh status of all workers using health monitor.
  * Concurrency limited to 3 simultaneous checks.
  */
 export async function refreshChildrenStatus(

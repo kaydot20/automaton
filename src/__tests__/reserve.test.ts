@@ -19,6 +19,11 @@ import os from "os";
 import fs from "fs";
 import { checkReserve, validateSpendCents } from "../conway/reserve.js";
 import { createBuiltinTools, executeTool } from "../agent/tools.js";
+import {
+  WORKER_DEFAULT_TTL_MS,
+  WORKER_MAX_FUNDING_CAP_CENTS,
+  createWorkerScope,
+} from "../replication/worker-scope.js";
 import { SimpleFundingProtocol } from "../orchestration/simple-tracker.js";
 import { DEFAULT_TREASURY_POLICY } from "../types.js";
 import type {
@@ -336,6 +341,15 @@ describe("fund_child reserve gate", () => {
     ctx = makeToolContext(conway);
     (ctx as any).db.getChildById = vi.fn().mockReturnValue(childRow);
     (ctx as any).db.raw = rawDb;
+    // M1-B10 (S7): fund_child now requires an active worker scope. Seed one
+    // so these assertions still exercise the RESERVE gate rather than the
+    // scope gate. The cap is set far above these amounts so it never binds.
+    createWorkerScope(ctx.db as any, "c1", {
+      job: "minimum-reserve regression worker",
+      role: "task",
+      ttlMs: WORKER_DEFAULT_TTL_MS,
+      fundingCapCents: WORKER_MAX_FUNDING_CAP_CENTS,
+    });
     closeDb = () => rawDb.close();
   });
 

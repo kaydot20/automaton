@@ -71,6 +71,12 @@ const EXTERNAL_BLOCKED_TOOLS = [
   // before npm, before an installed_tools row, before conway.exec.
   "install_mcp_server",
   "install_npm_package",
+  // M1-B10 scoped workers: the worker authority surface (create, fund,
+  // revoke) is agent/creator-initiated only. A heartbeat task must never be
+  // able to mint a worker, move credits to one, or cut one off.
+  "spawn_child",
+  "fund_child",
+  "revoke_worker",
 ] as const;
 
 /**
