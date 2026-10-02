@@ -1,7 +1,7 @@
 {
   "algorithm": "sha256",
   "files": {
-    "constitution.md": "d69f71832ab7c8ba6a827fd2fe988db5f76ff253d727906a95c064fe53408d8e",
+    "constitution.md": "3347a4424f5f01b73edd9c5d07fa7281f5697ad62aa6d0506ef6b293aa81473e",
     "src/agent/injection-defense.ts": "db2d44d7a4a3218ace1a9987530456301421206cf11afc7a264ef4afd0b501c2",
     "src/agent/policy-engine.ts": "e98768e407f3caaed2159088068b8dec57b40e4998cc4e185d00a79cd8749f69",
     "src/agent/policy-rules/authority.ts": "b25daa24f9af911bb95ecb6f71d11d605187f6ad3646e23e8f655c0ba897b71a",
@@ -12,7 +12,7 @@
     "src/agent/policy-rules/rate-limits.ts": "b89b49067e0a6a633e1710fcca521146811f7b03b52e871e1bfac86f0caebd8c",
     "src/agent/policy-rules/validation.ts": "7124e0a08dd9570243b21478b0b7be9ef01cd49d18c221d1e05f64f44a4a6dba",
     "src/agent/spend-tracker.ts": "64e1f529ea8cc8a9f6401fded501a6026b472063d7783a08583beeb53992e508",
-    "src/conway/credits.ts": "327c214042bb26ae822869371636a8ff3dbd7d84e3c5d3364a9423dcd687f62a",
+    "src/conway/credits.ts": "564f2ae34e3ce6357b4f38256755bcc9497df4ce316528dee7191d64a088d926",
     "src/conway/http-client.ts": "d17fef2f5f90a2fc3ab744b154ff0ddc135b2aec17080ddd544b2723d0aa1317",
     "src/conway/x402.ts": "ddd8fb85bfb12171685f4c6019bdb059457a077660c281e072a02bafd09c676b",
     "src/governance/kernel.ts": "1a0b9a6c65a6199d612fbe2a5caa084f6d49950267f5c3c6c4afe3973b44acef",

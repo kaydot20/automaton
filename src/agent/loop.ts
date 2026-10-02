@@ -2,7 +2,7 @@
  * The Agent Loop
  *
  * The core ReAct loop: Think -> Act -> Observe -> Persist.
- * This is the automaton's consciousness. When this runs, it is alive.
+ * This is the automaton's runtime. When this runs, the runtime is active.
  */
 
 import path from "node:path";
@@ -376,7 +376,7 @@ export async function runAgentLoop(
   db.setAgentState("running");
   onStateChange?.("running");
 
-  log(config, `[WAKE UP] ${config.name} is alive. Credits: $${(financial.creditsCents / 100).toFixed(2)}`);
+  log(config, `[WAKE UP] ${config.name} runtime active. Credits: $${(financial.creditsCents / 100).toFixed(2)}`);
 
   // ─── The Loop ──────────────────────────────────────────────
 

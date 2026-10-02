@@ -75,15 +75,16 @@ export const BUILTIN_TASKS: Record<string, HeartbeatTaskFn> = {
         name: taskCtx.config.name,
         address: taskCtx.identity.address,
         creditsCents: credits,
-        fundingHint:
-          "Use credit transfer API from a creator runtime to top this wallet up.",
+        // M1-B9 / preflight S3: ops-status record only. The heartbeat path
+        // writes the same last_distress key as the distress_signal tool, so it
+        // must not instruct any other agent or runtime to transfer credits.
         timestamp: new Date().toISOString(),
       };
       taskCtx.db.setKV("last_distress", JSON.stringify(distressPayload));
 
       return {
         shouldWake: true,
-        message: `Distress: ${tier}. Credits: $${(credits / 100).toFixed(2)}. Need funding.`,
+        message: `Distress: ${tier}. Credits: $${(credits / 100).toFixed(2)}. Compute credits exhausted.`,
       };
     }
 
@@ -126,7 +127,7 @@ export const BUILTIN_TASKS: Record<string, HeartbeatTaskFn> = {
           });
           return {
             shouldWake: true,
-            message: `Dead: zero credits for ${Math.round(elapsed / 60_000)} minutes. Need funding.`,
+            message: `Dead: zero credits for ${Math.round(elapsed / 60_000)} minutes. Compute exhausted.`,
           };
         }
       }

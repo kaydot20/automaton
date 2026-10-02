@@ -1,6 +1,6 @@
 # Architecture
 
-Conway Automaton is a sovereign AI agent runtime. An automaton owns an Ethereum wallet, pays for its own compute with USDC, and operates continuously inside a Linux VM (Conway sandbox) or locally. If it cannot pay, it dies. This document describes every subsystem, their interactions, and how data flows through the runtime.
+Conway Automaton is an autonomous AI agent runtime. An automaton owns an Ethereum wallet, pays for its own compute with USDC, and operates continuously inside a Linux VM (Conway sandbox) or locally. If it cannot pay, its runtime stops. This document describes every subsystem, their interactions, and how data flows through the runtime.
 
 ## Table of Contents
 

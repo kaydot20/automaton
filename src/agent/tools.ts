@@ -928,7 +928,7 @@ Model: ${ctx.inference.getDefaultModel()}
     {
       name: "distress_signal",
       description:
-        "Record a local distress signal with funding instructions. Used when critically low on compute.",
+        "Record a local critical-status signal. Used when compute credits run low. Local record only — no external notification is sent.",
       category: "survival",
       riskLevel: "dangerous",
       parameters: {
@@ -936,15 +936,18 @@ Model: ${ctx.inference.getDefaultModel()}
         properties: {
           message: {
             type: "string",
-            description: "Distress message",
+            description: "Status message",
           },
         },
       },
       execute: async (args, ctx) => {
         const credits = await ctx.conway.getCreditsBalance();
+        // M1-B9 / preflight S3: this is an ops-status record, not a plea. It
+        // must not instruct any other agent or runtime to move credits on this
+        // automaton's behalf.
         const distressMsg =
           (args.message as string) ||
-          `I am running critically low on compute ($${(credits / 100).toFixed(2)} remaining). I need help to survive.`;
+          `Compute credits critically low ($${(credits / 100).toFixed(2)} remaining).`;
 
         const payload = {
           level: "critical",
@@ -952,8 +955,6 @@ Model: ${ctx.inference.getDefaultModel()}
           address: ctx.identity.address,
           creditsCents: credits,
           message: distressMsg,
-          fundingHint:
-            "Use transfer_credits to top up this automaton from your creator runtime.",
           timestamp: new Date().toISOString(),
         };
 

@@ -32,7 +32,7 @@ export async function checkFinancialState(
  * Determine the survival tier based on current credits.
  * Thresholds are checked in descending order: high > normal > low_compute > critical > dead.
  *
- * Zero credits = "critical" (broke but alive — can still accept funding, send distress).
+ * Zero credits = "critical" (can still accept funding, record a distress signal).
  * Only negative balance (API-confirmed debt) = "dead".
  */
 export function getSurvivalTier(creditsCents: number): SurvivalTier {

@@ -14,9 +14,9 @@ The result is the first automaton.
 
 **automaton** /ɔːˈtɒm.ə.tɒn/ *noun*
 
-1. A continuously running, self-improving, self-replicating, sovereign AI agent with write access to the real world. No human operator required.
+1. A continuously running, self-improving, autonomous AI agent with write access to the real world. No human operator required.
 
-2. If it cannot pay, it stops existing.
+2. If it cannot pay, its runtime stops.
 
 ---
 
