@@ -690,14 +690,31 @@ export const BUILTIN_TASKS: Record<string, HeartbeatTaskFn> = {
       const { ChildLifecycle } = await import("../replication/lifecycle.js");
       const { SandboxCleanup } = await import("../replication/cleanup.js");
       const { pruneDeadChildren } = await import("../replication/lineage.js");
+      const { enforceWorkerExpiry } = await import("../replication/worker-scope.js");
 
       const lifecycle = new ChildLifecycle(taskCtx.db.raw);
       const cleanup = new SandboxCleanup(taskCtx.conway, lifecycle, taskCtx.db.raw);
+
+      // M1-B10 TTL remediation: this is the parent-owned periodic worker
+      // maintenance task, so the TTL sweep runs here rather than on a new
+      // scheduler. Enforces job lifetime before general pruning.
+      const expiry = await enforceWorkerExpiry(taskCtx.db, taskCtx.conway);
+      if (expiry.revoked.length > 0 || expiry.cleanedUp.length > 0 || expiry.malformed.length > 0) {
+        logger.info(
+          `Worker TTL sweep: ${expiry.revoked.length} revoked, ${expiry.cleanedUp.length} cleaned, ${expiry.malformed.length} malformed`,
+        );
+      }
+      for (const failure of expiry.errors) {
+        logger.error(`Worker TTL sweep failed for ${failure.workerId}: ${failure.reason}`);
+      }
+
       const cleaned = await pruneDeadChildren(taskCtx.db, cleanup);
 
       taskCtx.db.setKV("last_dead_agent_cleanup", JSON.stringify({
         timestamp: new Date().toISOString(),
         cleaned,
+        expiredWorkersRevoked: expiry.revoked.length,
+        expiredWorkersCleaned: expiry.cleanedUp.length,
       }));
 
       return { shouldWake: false };

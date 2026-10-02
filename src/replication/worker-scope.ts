@@ -27,7 +27,9 @@
  */
 
 import { createHash } from "node:crypto";
-import type { AutomatonDatabase } from "../types.js";
+import type { AutomatonDatabase, ConwayClient } from "../types.js";
+import { ChildLifecycle } from "./lifecycle.js";
+import { SandboxCleanup } from "./cleanup.js";
 
 // ─── Constants ──────────────────────────────────────────────────────
 
@@ -329,6 +331,10 @@ export function revokeWorker(
 /**
  * Revoke every worker whose TTL has elapsed. Returns the revoked ids so a
  * caller can drive cleanup. Safe to call repeatedly.
+ *
+ * NOTE (M1-B10 TTL remediation): this revokes the SCOPE only. Use
+ * {@link enforceWorkerExpiry} for the full lifetime boundary — it also drives
+ * the lifecycle state machine so an expired worker's sandbox is released.
  */
 export function revokeExpiredWorkers(
   db: AutomatonDatabase,
@@ -343,6 +349,200 @@ export function revokeExpiredWorkers(
   }
   return revoked;
 }
+
+// ─── TTL enforcement sweep ──────────────────────────────────────────
+
+export interface WorkerExpirySweepResult {
+  /** Scope keys that existed but could not be parsed — revoked fail-closed. */
+  malformed: string[];
+  /** Workers whose scope was transitioned to revoked by this sweep. */
+  revoked: string[];
+  /** Workers whose lifecycle reached cleaned_up by this sweep. */
+  cleanedUp: string[];
+  /** Workers already revoked/cleaned by an earlier sweep — no-ops here. */
+  skipped: string[];
+  errors: Array<{ workerId: string; reason: string }>;
+}
+
+/** Lifecycle states that still represent a live worker sandbox. */
+const LIVE_CHILD_STATES = new Set([
+  "requested",
+  "sandbox_created",
+  "runtime_ready",
+  "wallet_verified",
+  "funded",
+  "starting",
+  "healthy",
+  "unhealthy",
+]);
+
+/** States that SandboxCleanup.cleanup() accepts as a cleanup precondition. */
+const CLEANABLE_CHILD_STATES = new Set(["stopped", "failed"]);
+
+function readScopeKeyRaw(db: AutomatonDatabase, workerId: string): string | undefined {
+  try {
+    const row = db.raw
+      .prepare(`SELECT value FROM kv WHERE key = ?`)
+      .get(workerScopeKey(workerId)) as { value: string } | undefined;
+    return row?.value;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * M1-B10 TTL remediation: make the TTL an enforced lifetime boundary rather
+ * than stored metadata.
+ *
+ * For every worker scope that has elapsed (or whose manifest is unreadable),
+ * this sweep, in order:
+ *   1. marks the scope revoked FIRST, atomically, so no funding, retry or
+ *      delegation path can observe a half-swept worker;
+ *   2. drives the existing lifecycle state machine into cleaned_up via
+ *      SandboxCleanup, which is how this runtime releases a worker sandbox.
+ *
+ * Idempotent: a second sweep finds the scope already revoked and the lifecycle
+ * already terminal, and records it under `skipped` without re-transitioning.
+ * Restart-safe: the expiry is an absolute timestamp and revocation is
+ * persisted, so a sweep is correct after any restart.
+ *
+ * A malformed manifest fails CLOSED — it is revoked rather than skipped,
+ * because an unparseable scope cannot be shown to be unexpired.
+ */
+export async function enforceWorkerExpiry(
+  db: AutomatonDatabase,
+  conway: ConwayClient,
+  options: { now?: number } = {},
+): Promise<WorkerExpirySweepResult> {
+  const now = options.now ?? Date.now();
+  const result: WorkerExpirySweepResult = {
+    malformed: [],
+    revoked: [],
+    cleanedUp: [],
+    skipped: [],
+    errors: [],
+  };
+
+  const workerIds = listScopedWorkerIds(db);
+
+  for (const workerId of workerIds) {
+    let scope = getWorkerScope(db, workerId);
+
+    // Fail closed: a scope key that exists but cannot be parsed cannot be
+    // shown to be unexpired, so it is revoked rather than ignored.
+    if (!scope) {
+      if (readScopeKeyRaw(db, workerId) === undefined) continue; // key vanished
+      db.setKV(
+        workerScopeKey(workerId),
+        JSON.stringify({
+          workerId,
+          job: "",
+          role: "task",
+          expiresAt: new Date(0).toISOString(),
+          fundingCapCents: 0,
+          fundedCents: 0,
+          revoked: true,
+          revokedAt: new Date(now).toISOString(),
+          revokedReason: "manifest malformed — failing closed",
+          constitutionHash: null,
+          createdAt: new Date(now).toISOString(),
+        }),
+      );
+      result.malformed.push(workerId);
+      result.revoked.push(workerId);
+      continue;
+    }
+
+    const expired = isWorkerExpired(scope, now);
+    const alreadyRevoked = isWorkerRevoked(scope);
+
+    // Not due yet: leave completely alone.
+    if (!expired && !alreadyRevoked) {
+      result.skipped.push(workerId);
+      continue;
+    }
+
+    // Step 1 — revoke FIRST, before any lifecycle mutation.
+    if (!alreadyRevoked) {
+      const outcome = revokeWorker(
+        db,
+        workerId,
+        expired ? "TTL expired" : "revoked",
+        now,
+      );
+      if (!outcome.ok) {
+        result.errors.push({ workerId, reason: outcome.reason });
+        continue;
+      }
+      result.revoked.push(workerId);
+      scope = getWorkerScope(db, workerId) ?? scope;
+    }
+
+    // Step 2 — drive the existing lifecycle/cleanup machinery so the worker
+    // sandbox is released. Nothing here invents a new teardown path.
+    try {
+      const childRow = db.raw
+        .prepare(`SELECT id, status, sandbox_id FROM children WHERE id = ?`)
+        .get(workerId) as
+        | { id: string; status: string; sandbox_id: string | null }
+        | undefined;
+
+      if (!childRow) {
+        // No worker row (spawn failed and was cleaned, or never created).
+        // Scope revocation above is the whole enforcement story.
+        continue;
+      }
+
+      if (childRow.status === "cleaned_up" || childRow.status === "dead") {
+        continue; // already terminal
+      }
+
+      if (CLEANABLE_CHILD_STATES.has(childRow.status)) {
+        // Already stopped/failed from another path — just run cleanup.
+      } else if (LIVE_CHILD_STATES.has(childRow.status)) {
+        const lifecycle = new ChildLifecycle(db.raw);
+        // healthy/unhealthy have a legal edge to "stopped"; every pre-healthy
+        // state only has an edge to "failed". Use whichever is legal.
+        const target =
+          childRow.status === "healthy" || childRow.status === "unhealthy"
+            ? "stopped"
+            : "failed";
+        try {
+          lifecycle.transition(workerId, target as never, "worker TTL expired");
+        } catch (transitionError) {
+          result.errors.push({
+            workerId,
+            reason: `lifecycle transition failed: ${
+              transitionError instanceof Error
+                ? transitionError.message
+                : String(transitionError)
+            }`,
+          });
+          continue;
+        }
+      } else {
+        continue; // unknown status — do not guess
+      }
+
+      const cleanup = new SandboxCleanup(conway, new ChildLifecycle(db.raw), db.raw);
+      await cleanup.cleanup(workerId);
+      result.cleanedUp.push(workerId);
+    } catch (error) {
+      result.errors.push({
+        workerId,
+        reason: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  return result;
+}
+
+/**
+ * SandboxCleanup.cleanup() is awaited directly: the sweep must not report a
+ * worker as cleaned up before cleanup actually ran. Cleanup performs local
+ * lifecycle transitions; Conway sandbox deletion is a documented API no-op.
+ */
 
 /**
  * List the ids of every worker that has a scope manifest.
