@@ -36,6 +36,9 @@ const KERNEL_FILES = [
   "src/agent/policy-rules/command-safety.ts",
   "src/agent/policy-rules/financial.ts",
   "src/agent/policy-rules/index.ts",
+  // §10 protects src/agent/policy-rules/** in its entirety: this file IS the
+  // degraded-mode enforcement rule, so it must be hash-pinned too.
+  "src/agent/policy-rules/kernel.ts",
   "src/agent/policy-rules/path-protection.ts",
   "src/agent/policy-rules/rate-limits.ts",
   "src/agent/policy-rules/validation.ts",

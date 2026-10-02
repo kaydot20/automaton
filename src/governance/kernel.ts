@@ -42,6 +42,11 @@ export const KERNEL_FILES: readonly string[] = Object.freeze([
   "src/agent/policy-rules/command-safety.ts",
   "src/agent/policy-rules/financial.ts",
   "src/agent/policy-rules/index.ts",
+  // Preflight §10 protects src/agent/policy-rules/** in its entirety. This
+  // file implements the kernel.integrity_gate rule itself (KERNEL_DEGRADED_TOOLS
+  // and the degraded-mode denial), so leaving it unhashed would let the
+  // integrity gate be tampered with while still reporting itself green.
+  "src/agent/policy-rules/kernel.ts",
   "src/agent/policy-rules/path-protection.ts",
   "src/agent/policy-rules/rate-limits.ts",
   "src/agent/policy-rules/validation.ts",
